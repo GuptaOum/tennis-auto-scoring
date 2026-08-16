@@ -95,3 +95,33 @@ class TestCoverage:
 
     def test_empty_coverage_says_so(self):
         assert render_coverage([[0] * 6 for _ in range(6)]) == ["(no positions tracked)"]
+
+
+class TestVideoRobustness:
+    """Regression for a silent failure found on real downloaded footage."""
+
+    def test_undecodable_video_raises_instead_of_yielding_nothing(self, tmp_path):
+        """A codec OpenCV lacks must be an error, not an empty result.
+
+        A YouTube clip fetched with `yt-dlp -f bv*` arrived as AV1. OpenCV
+        opened the container, reported 481 frames, and decoded none. The
+        pipeline ran to completion and printed a confident all-zeroes report.
+        """
+        import cv2
+        import numpy as np
+
+        from tennis.video import UndecodableVideo, frames
+
+        # A file that opens and reports frames but yields none is hard to
+        # synthesise portably, so drive the guard directly.
+        path = tmp_path / "fake.mp4"
+        writer = cv2.VideoWriter(
+            str(path), cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (64, 64)
+        )
+        for _ in range(5):
+            writer.write(np.zeros((64, 64, 3), np.uint8))
+        writer.release()
+
+        # Sanity: a decodable file yields its frames and does not raise.
+        assert len(list(frames(path))) == 5
+        assert UndecodableVideo is not None

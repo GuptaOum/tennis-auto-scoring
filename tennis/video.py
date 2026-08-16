@@ -64,12 +64,36 @@ def probe(path: str | Path) -> VideoInfo:
         cap.release()
 
 
+class UndecodableVideo(ValueError):
+    """The container opened but no frames could be decoded."""
+
+
+def codec_of(path: str | Path) -> str:
+    """The video's FourCC code, e.g. 'avc1' or 'av01'. Empty if unknown."""
+    cap = cv2.VideoCapture(str(path))
+    try:
+        raw = int(cap.get(cv2.CAP_PROP_FOURCC))
+    finally:
+        cap.release()
+    if not raw:
+        return ""
+    return "".join(chr((raw >> (8 * i)) & 0xFF) for i in range(4)).strip()
+
+
 def frames(
     path: str | Path,
     start: int = 0,
     limit: int | None = None,
 ) -> Iterator[tuple[int, np.ndarray]]:
-    """Yield ``(frame_index, frame)`` one at a time. Never holds more than one."""
+    """Yield ``(frame_index, frame)`` one at a time. Never holds more than one.
+
+    Raises :class:`UndecodableVideo` if the file opens and reports frames but
+    none decode. That combination is almost always a codec OpenCV was not
+    built with - AV1 is the common one, and it is what YouTube now serves by
+    default, so any clip fetched with ``yt-dlp -f bv*`` is likely to hit it.
+    Without this check the pipeline runs to completion over zero frames and
+    reports a confident, meaningless all-zeroes result.
+    """
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         raise ValueError(f"could not open video: {path}")
@@ -87,6 +111,15 @@ def frames(
             emitted += 1
             if limit is not None and emitted >= limit:
                 break
+
+        if emitted == 0 and int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) > 0:
+            raise UndecodableVideo(
+                f"{Path(path).name} reports frames but none could be decoded - "
+                f"OpenCV is probably missing this codec (AV1 is the usual "
+                f"culprit). Transcode it first:\n"
+                f"    ffmpeg -i {Path(path).name} -c:v libx264 -crf 20 "
+                f"-an fixed.mp4"
+            )
     finally:
         cap.release()
 

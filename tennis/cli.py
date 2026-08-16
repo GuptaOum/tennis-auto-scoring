@@ -110,6 +110,9 @@ def draw_overlay(
 def run(args: argparse.Namespace) -> dict:
     info = video.probe(args.input)
     print(f"input: {info}", flush=True)
+    codec = video.codec_of(args.input)
+    if codec:
+        print(f"codec: {codec}", flush=True)
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
