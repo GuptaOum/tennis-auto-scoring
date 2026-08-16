@@ -41,17 +41,37 @@ def make_event(
     )
 
 
-def arc(start_frame: int, count: int, peak_height: float = 90.0) -> list[BallSample]:
-    """One parabolic flight: image y dips (ball rises) then returns (falls)."""
+# How far a metre of ball height displaces its projected court position. Any
+# value > 0 reproduces the effect; the real one depends on camera geometry.
+PROJECTION_GAIN = 3.0
+
+
+def arc(
+    start_frame: int,
+    count: int,
+    contact_y: float = FAR_Y,
+    travel: float = 0.0,
+    peak_height: float = 2.0,
+    x: float = MID_X,
+) -> list[BallSample]:
+    """One flight between two ground contacts, as the camera would see it.
+
+    Height follows a half-sine: zero at both ends (the ball is touching the
+    court), highest in the middle. Projected court y is displaced *away from
+    the camera* in proportion to that height, which is what a homography does
+    to anything not lying on the plane it maps. So projected court y peaks at
+    the contacts and dips at the apex - the signal the detector reads.
+    """
     samples = []
     for i in range(count):
         t = i / max(count - 1, 1)
-        image_y = 600.0 - peak_height * np.sin(np.pi * t)
+        height = peak_height * np.sin(np.pi * t)
+        true_y = contact_y + travel * t
         samples.append(
             BallSample(
                 frame=start_frame + i,
-                image=np.array([500.0 + 6 * i, image_y]),
-                court=np.array([MID_X, FAR_Y + 0.4 * i]),
+                image=np.array([500.0 + 6 * i, 600.0 - 90 * np.sin(np.pi * t)]),
+                court=np.array([x, true_y - PROJECTION_GAIN * height]),
                 confidence=0.9,
             )
         )
@@ -127,7 +147,7 @@ class TestEventDetection:
             BallSample(
                 i,
                 np.array([500.0 + i, 600.0 + rng.normal(0, 0.8)]),
-                np.array([MID_X, FAR_Y + 0.01 * i]),
+                np.array([MID_X, FAR_Y + 0.01 * i + rng.normal(0, 0.15)]),
                 0.9,
             )
             for i in range(120)
@@ -177,32 +197,42 @@ class TestEventDetection:
         assert EventType.HIT in near_kinds
         assert near_kinds == far_kinds
 
-    def test_airborne_projection_lowers_bounce_confidence(self):
-        """A 'bounce' projected off the map was really a ball in the air.
+    def test_apex_of_a_flight_is_not_an_event(self):
+        """The top of the arc is neither a bounce nor a hit.
 
-        The homography maps the court plane, so an airborne ball's image ray
-        lands far beyond it - real footage produced court y of -7.1 m. Such a
-        reading cannot support an in/out call and must be marked down.
+        This was the failure on real footage: image y turns at the apex too, so
+        an image-y detector reported phantom events several metres in the air -
+        projected court y of -4.7 m on a court that starts at 0.
         """
-        samples = arc(0, 15) + arc(15, 15)
-        for s in samples:
-            s.court = np.array([MID_X, -7.1])   # impossible landing spot
+        samples = arc(0, 21, contact_y=18.0, travel=-14.0)
+        events = detect_events(Trajectory(samples))
+        apex_frame = 10
+        assert all(abs(e.frame - apex_frame) > 3 for e in events)
+
+    def test_ground_contacts_are_found_at_both_ends_of_a_flight(self):
+        samples = arc(0, 21, contact_y=18.0, travel=-14.0) + arc(
+            21, 21, contact_y=4.0, travel=14.0
+        )
+        events = detect_events(Trajectory(samples))
+        frames = [e.frame for e in events]
+        assert any(abs(f - 20) <= 3 for f in frames)   # the join = ground contact
+
+    def test_airborne_reading_lowers_bounce_confidence(self):
+        """A 'landing' projected off the map means the ball was still up.
+
+        Real footage produced court y of -7.1 m, seven metres behind a baseline
+        the ball never crossed. Such a reading cannot support an in/out call.
+        """
+        samples = arc(0, 15, contact_y=-7.1) + arc(15, 15, contact_y=-7.1)
         events = detect_events(Trajectory(samples))
         bounces = [e for e in events if e.type is EventType.BOUNCE]
         assert bounces and all(e.confidence < 0.5 for e in bounces)
 
     def test_out_of_bounds_bounce_is_marked(self):
-        samples = []
-        for i in range(30):
-            t = (i % 15) / 14
-            samples.append(
-                BallSample(
-                    i,
-                    np.array([500.0 + 6 * i, 600.0 - 90 * np.sin(np.pi * t)]),
-                    np.array([DOUBLES_WIDTH + 2.0, FAR_Y]),  # well wide
-                    0.9,
-                )
-            )
+        # Ground contacts well outside the singles sideline, but still on the
+        # court plane - so the landing position itself is trustworthy.
+        wide = DOUBLES_WIDTH + 2.0
+        samples = arc(0, 15, x=wide) + arc(15, 15, x=wide)
         events = detect_events(Trajectory(samples))
         assert events and all(not e.in_bounds for e in events)
 

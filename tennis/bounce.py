@@ -2,41 +2,47 @@
 
 The baseline had one event detector: a sign change in the ball's vertical
 position, which it labelled a "shot". That conflates the two things that
-actually happen to a tennis ball, because both reverse its direction - a racket
-hit and a bounce off the court. Its own stats are wrong for that reason, and no
-scoring is possible on top of it, since a rally is precisely a *sequence* of
-alternating hits and bounces.
+actually happen to a tennis ball - a racket hit and a bounce off the court -
+and no scoring can be built on top of it, since a rally is precisely a
+*sequence* of alternating hits and bounces.
 
-This module separates them, using two signals the baseline could not access
-because it never had a real homography:
+Separating them needs to know when the ball is near the ground, and the trick
+is that the homography already measures that, by way of its own error.
 
-  vertical  - image-space y. The camera is above the court, so a ball falling
-              towards the ground moves down the frame. A bounce is a local
-              maximum in image y: descent reverses to ascent.
-  depth     - court-space y, in metres. A racket hit reverses the ball's travel
-              *along* the court, sending it back towards the other end. A
-              bounce does not.
+A homography maps the court *plane*. A ball in the air is not on that plane, so
+the camera ray through it pierces the plane somewhere beyond the ball's true
+position - always further from the camera, and further the higher the ball is.
+So the projected court position of an airborne ball is wrong in a specific,
+usable direction: **the projection error is a height measurement.**
 
-A turning point that reverses vertically while the ball is far from both
-players is a bounce. One that reverses in depth near a player is a hit. Both
-carry a confidence, so an ambiguous event degrades a point's confidence instead
-of silently deciding it.
+Measured on real footage, one rally's turning points looked like this:
 
-**Proximity is measured in the image, not on the court.** This is not a
-shortcut - it is forced by what a homography actually is. The matrix maps the
-court *plane*; a ball two metres in the air is not on that plane, so its image
-ray strikes the plane well beyond the ball's true position. Measured on real
-footage, an airborne ball projected to court y of -7.1 m: seven metres behind a
-baseline it never crossed. Court coordinates are trustworthy at exactly one
-moment - when the ball is touching the ground, which is the bounce.
+    frame   image y   projected court y
+    f9        736         +20.5          ball on the ground, near end
+    f40       311          +0.3          ball on the ground, far end
+    f56       243          -4.7          apex of the arc, several metres up
 
-So the two questions are answered in the two spaces where each is valid:
+The court is 0 to 23.77 m long, so -4.7 is nonsense as a position - and exactly
+right as a signal. Projected court y falls as the ball rises and recovers as it
+descends, which makes:
 
-  is the ball near a player?   image space, in pixels, normalised by the
-                               player's box height so a far player and a near
-                               player use the same threshold
-  where did it land?           court space, in metres, valid because a bounce
-                               is by definition on the plane
+    local maximum in projected court y   ->  ball is at its lowest: ground
+                                             contact, so a bounce or a hit
+    local minimum                        ->  apex of the flight: not an event
+
+Raw image y cannot do this job, because in a perspective view it confounds
+height with depth - a ball high in the frame may be high in the air or simply
+far away. Projected court y separates the two.
+
+Ground-contact events are then split by asking whether a player was within
+racket reach, measured **in image space**: an airborne ball's court coordinate
+is metres from where it really is, so court-space proximity is meaningless,
+while a ball beside a player in the image really is beside them. Distance is
+normalised by the player's bounding-box height, so one threshold serves a near
+player 400 px tall and a far player 90 px tall.
+
+Every event carries a confidence, so an ambiguous one degrades a point's
+confidence instead of silently deciding it.
 """
 
 from __future__ import annotations
@@ -73,8 +79,12 @@ class BallEvent:
         )
 
 
-def _turning_points(values: np.ndarray, min_prominence: float) -> list[int]:
+def _turning_points(
+    values: np.ndarray, min_prominence: float, kind: str = "both"
+) -> list[int]:
     """Indices where a 1-D signal reverses direction, ignoring small wobbles.
+
+    ``kind`` selects ``"max"`` (peaks), ``"min"`` (valleys) or ``"both"``.
 
     ``min_prominence`` is how far the signal must travel away from the turning
     point, on both sides, before the reversal counts. Without it, detector
@@ -88,7 +98,8 @@ def _turning_points(values: np.ndarray, min_prominence: float) -> list[int]:
         before, here, after = values[i - 1], values[i], values[i + 1]
         is_peak = here >= before and here >= after
         is_valley = here <= before and here <= after
-        if not (is_peak or is_valley):
+        wanted = {"max": is_peak, "min": is_valley, "both": is_peak or is_valley}[kind]
+        if not wanted:
             continue
 
         # Walk outwards until the signal has moved far enough to be convincing.
@@ -121,8 +132,8 @@ def detect_events(
     player_boxes: dict[int, dict[int, tuple[float, float, float, float]]]
     | None = None,
     fps: float = 30.0,
-    min_vertical_prominence: float = 6.0,
-    hit_reach: float = 1.3,
+    min_ground_prominence: float = 1.5,
+    hit_reach: float = 0.8,
     line_margin: float = 0.10,
 ) -> list[BallEvent]:
     """Find bounces and hits along a ball trajectory.
@@ -131,12 +142,16 @@ def detect_events(
     pixels. Without it, every event is classified as a bounce, since hits are
     only distinguishable by proximity to a player.
 
+    ``min_ground_prominence`` is how far projected court y must swing, in
+    metres, for a descent-then-recovery to count as ground contact rather than
+    detector jitter.
+
     ``hit_reach`` is how close the ball must be to a player, in multiples of
     that player's bounding-box height. A player's box is roughly their real
-    height, so 1.3 covers an outstretched arm plus a racket (~1.5 m on a 1.8 m
-    player) with margin. Normalising by box height rather than using a fixed
-    pixel radius is what lets one threshold serve a near player 400 px tall and
-    a far player 90 px tall.
+    height, so 0.8 covers an outstretched arm plus a racket (~1.4 m on a 1.8 m
+    player). Normalising by box height rather than using a fixed pixel radius
+    is what lets one threshold serve a near player 400 px tall and a far player
+    90 px tall.
     """
     events: list[BallEvent] = []
     # Events cannot be closer together than a ball can physically travel; at
@@ -147,43 +162,31 @@ def detect_events(
         if len(run) < 5:
             continue
 
-        image_y = np.array([s.image[1] for s in run])
-        court_y = np.array([s.court[1] for s in run])
-
-        vertical = _dedupe(
-            _turning_points(image_y, min_vertical_prominence), min_separation
+        # Projected court y as a height proxy: it dips while the ball is up and
+        # peaks when the ball comes back down to the plane. Maxima are ground
+        # contact; minima are the apex of a flight and are not events at all.
+        height_signal = np.array([s.court[1] for s in run])
+        contacts = _dedupe(
+            _turning_points(height_signal, min_ground_prominence, kind="max"),
+            min_separation,
         )
-        # Depth prominence in metres: a shot crosses most of a half-court, so
-        # 2 m of travel is a low bar that still rejects jitter.
-        depth = _dedupe(_turning_points(court_y, 2.0), min_separation)
 
-        for index in sorted(set(vertical) | set(depth)):
+        for index in contacts:
             sample = run[index]
             nearest_player, distance = _nearest_player(
                 sample.image, sample.frame, player_boxes
             )
-
-            reversed_depth = index in depth
             near_a_player = distance is not None and distance <= hit_reach
 
-            if near_a_player and (reversed_depth or index in vertical):
+            if near_a_player:
                 kind = EventType.HIT
-                # Most credible when both signals agree: the ball turned around
-                # in depth *and* someone was within racket reach of it.
+                # Closer to the player is a more convincing racket strike.
                 confidence = sample.confidence * (
                     1.0 - min(distance / hit_reach, 1.0) * 0.3
                 )
-                if not reversed_depth:
-                    confidence *= 0.8
-            elif index in vertical and not near_a_player:
+            else:
                 kind = EventType.BOUNCE
                 confidence = sample.confidence
-            else:
-                # Ambiguous: a vertical turn right beside a player, or a depth
-                # turn in open court. Record it as the more likely of the two
-                # but mark it down, so any point resting on it is flagged.
-                kind = EventType.HIT if near_a_player else EventType.BOUNCE
-                confidence = sample.confidence * 0.5
 
             if sample.interpolated:
                 confidence *= 0.6
