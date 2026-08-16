@@ -46,6 +46,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=30,
         help="re-estimate court keypoints every N frames (0 = once, at the start)",
     )
+    parser.add_argument(
+        "--device",
+        default="auto",
+        help="cuda, cpu, or auto (default: use the GPU when one is present)",
+    )
     parser.add_argument("--player-model", default="yolov8x.pt")
     parser.add_argument("--ball-model", default="models/yolo5_last.pt")
     parser.add_argument("--court-model", default="models/keypoints_model.pth")
@@ -105,10 +110,16 @@ def run(args: argparse.Namespace) -> dict:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    device = args.device
+    if device == "auto":
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"device: {device}", flush=True)
+
     print("loading models...", flush=True)
-    players_model = PlayerDetector(args.player_model)
-    ball_model = BallDetector(args.ball_model)
-    court_model = CourtDetector(args.court_model)
+    players_model = PlayerDetector(args.player_model, device=device)
+    ball_model = BallDetector(args.ball_model, device=device)
+    court_model = CourtDetector(args.court_model, device=device)
 
     writer = None
     if not args.no_video:
@@ -201,6 +212,7 @@ def run(args: argparse.Namespace) -> dict:
             "frames_processed": processed,
         },
         "performance": {
+            "device": device,
             "seconds": round(elapsed, 1),
             "fps": round(processed / elapsed, 2) if elapsed else None,
         },

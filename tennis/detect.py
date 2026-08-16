@@ -51,13 +51,16 @@ class Detection:
 
 
 class PlayerDetector:
-    def __init__(self, model_path: str = "yolov8x.pt", conf: float = 0.5) -> None:
+    def __init__(self, model_path: str = "yolov8x.pt", conf: float = 0.5,
+                 device: str = "cpu") -> None:
         self.model = YOLO(model_path)
         self.conf = conf
+        self.device = device
 
     def detect(self, frame: np.ndarray) -> list[Detection]:
         result = self.model.track(
-            frame, persist=True, classes=[0], conf=self.conf, verbose=False
+            frame, persist=True, classes=[0], conf=self.conf,
+            device=self.device, verbose=False
         )[0]
         out: list[Detection] = []
         for box in result.boxes:
@@ -72,12 +75,16 @@ class PlayerDetector:
 
 
 class BallDetector:
-    def __init__(self, model_path: str, conf: float = 0.15) -> None:
+    def __init__(self, model_path: str, conf: float = 0.15,
+                 device: str = "cpu") -> None:
         self.model = YOLO(model_path)
         self.conf = conf
+        self.device = device
 
     def detect(self, frame: np.ndarray) -> Detection | None:
-        result = self.model.predict(frame, conf=self.conf, verbose=False)[0]
+        result = self.model.predict(
+            frame, conf=self.conf, device=self.device, verbose=False
+        )[0]
         if not len(result.boxes):
             return None
         # Highest confidence, not last-in-loop. A tennis ball is one object;
