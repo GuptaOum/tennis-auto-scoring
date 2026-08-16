@@ -135,7 +135,7 @@ def run(args: argparse.Namespace) -> dict:
     calibrations: list[dict] = []
     ball_track: list[dict] = []
     player_track: list[dict] = []
-    player_positions: dict[int, dict[int, np.ndarray]] = {}
+    player_boxes: dict[int, dict[int, tuple]] = {}
     processed = 0
     started = time.time()
 
@@ -192,8 +192,11 @@ def run(args: argparse.Namespace) -> dict:
                         }
                     )
                     if player.track_id is not None:
-                        player_positions.setdefault(player.track_id, {})[index] = (
-                            court_pt
+                        # Image-space box, not the court position: hit detection
+                        # needs proximity, and an airborne ball's court
+                        # coordinate is projected metres from where it truly is.
+                        player_boxes.setdefault(player.track_id, {})[index] = (
+                            player.bbox
                         )
 
             if writer is not None:
@@ -215,8 +218,7 @@ def run(args: argparse.Namespace) -> dict:
     # Everything above is per-frame detection. Everything below turns that into
     # a score: trajectory -> bounces and hits -> rallies -> points.
     trajectory = from_detections(ball_track)
-    events = detect_events(trajectory, player_positions=player_positions,
-                           fps=info.fps)
+    events = detect_events(trajectory, player_boxes=player_boxes, fps=info.fps)
     match, rallies = rally_module.score_match(events, fps=info.fps)
     rally_summary = rally_module.summarise(rallies, fps=info.fps)
     report = {

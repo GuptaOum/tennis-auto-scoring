@@ -137,20 +137,59 @@ class TestEventDetection:
 
     def test_turning_point_near_a_player_is_a_hit(self):
         samples = arc(0, 15) + arc(15, 15)
-        # Put a player right where the trajectory turns.
-        turn = samples[14].court
-        players = {1: {s.frame: turn for s in samples}}
-        events = detect_events(Trajectory(samples), player_positions=players)
+        # A player box straddling the point where the trajectory turns.
+        turn = samples[14].image
+        box = (turn[0] - 40, turn[1] - 90, turn[0] + 40, turn[1] + 90)
+        players = {1: {s.frame: box for s in samples}}
+        events = detect_events(Trajectory(samples), player_boxes=players)
         assert any(e.type is EventType.HIT for e in events)
         hit = next(e for e in events if e.type is EventType.HIT)
         assert hit.by_player == 1
 
     def test_same_turn_far_from_players_is_a_bounce(self):
         samples = arc(0, 15) + arc(15, 15)
-        away = np.array([MID_X, COURT_LENGTH - 1.0])   # other end of the court
+        away = (20.0, 20.0, 100.0, 200.0)   # far corner of the frame
         players = {1: {s.frame: away for s in samples}}
-        events = detect_events(Trajectory(samples), player_positions=players)
+        events = detect_events(Trajectory(samples), player_boxes=players)
         assert any(e.type is EventType.BOUNCE for e in events)
+
+    def test_proximity_is_scale_invariant(self):
+        """One threshold must serve a near player and a far player.
+
+        The same ball-to-player offset, measured in box heights, has to
+        classify the same way whether the player is 360 px tall in the
+        foreground or 90 px tall at the far baseline.
+        """
+        samples = arc(0, 15) + arc(15, 15)
+        turn = samples[14].image
+
+        def box(height):
+            width = height / 3
+            return (turn[0] - width / 2, turn[1] - height / 2,
+                    turn[0] + width / 2, turn[1] + height / 2)
+
+        near = detect_events(Trajectory(samples),
+                             player_boxes={1: {s.frame: box(360) for s in samples}})
+        far = detect_events(Trajectory(samples),
+                            player_boxes={1: {s.frame: box(90) for s in samples}})
+        near_kinds = [e.type for e in near]
+        far_kinds = [e.type for e in far]
+        assert EventType.HIT in near_kinds
+        assert near_kinds == far_kinds
+
+    def test_airborne_projection_lowers_bounce_confidence(self):
+        """A 'bounce' projected off the map was really a ball in the air.
+
+        The homography maps the court plane, so an airborne ball's image ray
+        lands far beyond it - real footage produced court y of -7.1 m. Such a
+        reading cannot support an in/out call and must be marked down.
+        """
+        samples = arc(0, 15) + arc(15, 15)
+        for s in samples:
+            s.court = np.array([MID_X, -7.1])   # impossible landing spot
+        events = detect_events(Trajectory(samples))
+        bounces = [e for e in events if e.type is EventType.BOUNCE]
+        assert bounces and all(e.confidence < 0.5 for e in bounces)
 
     def test_out_of_bounds_bounce_is_marked(self):
         samples = []

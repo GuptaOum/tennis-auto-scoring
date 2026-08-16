@@ -21,6 +21,22 @@ A turning point that reverses vertically while the ball is far from both
 players is a bounce. One that reverses in depth near a player is a hit. Both
 carry a confidence, so an ambiguous event degrades a point's confidence instead
 of silently deciding it.
+
+**Proximity is measured in the image, not on the court.** This is not a
+shortcut - it is forced by what a homography actually is. The matrix maps the
+court *plane*; a ball two metres in the air is not on that plane, so its image
+ray strikes the plane well beyond the ball's true position. Measured on real
+footage, an airborne ball projected to court y of -7.1 m: seven metres behind a
+baseline it never crossed. Court coordinates are trustworthy at exactly one
+moment - when the ball is touching the ground, which is the bounce.
+
+So the two questions are answered in the two spaces where each is valid:
+
+  is the ball near a player?   image space, in pixels, normalised by the
+                               player's box height so a far player and a near
+                               player use the same threshold
+  where did it land?           court space, in metres, valid because a bounce
+                               is by definition on the plane
 """
 
 from __future__ import annotations
@@ -102,21 +118,25 @@ def _dedupe(indices: list[int], min_separation: int) -> list[int]:
 
 def detect_events(
     trajectory: Trajectory,
-    player_positions: dict[int, dict[int, np.ndarray]] | None = None,
+    player_boxes: dict[int, dict[int, tuple[float, float, float, float]]]
+    | None = None,
     fps: float = 30.0,
     min_vertical_prominence: float = 6.0,
-    hit_radius: float = 2.5,
+    hit_reach: float = 1.3,
     line_margin: float = 0.10,
 ) -> list[BallEvent]:
     """Find bounces and hits along a ball trajectory.
 
-    ``player_positions`` maps ``{player_id: {frame: court_xy}}``. Without it,
-    every event is classified as a bounce, since hits are only distinguishable
-    by proximity to a player.
+    ``player_boxes`` maps ``{track_id: {frame: (x1, y1, x2, y2)}}`` in image
+    pixels. Without it, every event is classified as a bounce, since hits are
+    only distinguishable by proximity to a player.
 
-    ``hit_radius`` is how close (in metres) the ball must be to a player for a
-    turning point to read as a racket strike. 2.5 m covers an arm plus a racket
-    plus the error in a foot-position estimate.
+    ``hit_reach`` is how close the ball must be to a player, in multiples of
+    that player's bounding-box height. A player's box is roughly their real
+    height, so 1.3 covers an outstretched arm plus a racket (~1.5 m on a 1.8 m
+    player) with margin. Normalising by box height rather than using a fixed
+    pixel radius is what lets one threshold serve a near player 400 px tall and
+    a far player 90 px tall.
     """
     events: list[BallEvent] = []
     # Events cannot be closer together than a ball can physically travel; at
@@ -140,19 +160,21 @@ def detect_events(
         for index in sorted(set(vertical) | set(depth)):
             sample = run[index]
             nearest_player, distance = _nearest_player(
-                sample.court, sample.frame, player_positions
+                sample.image, sample.frame, player_boxes
             )
 
             reversed_depth = index in depth
-            near_a_player = distance is not None and distance <= hit_radius
+            near_a_player = distance is not None and distance <= hit_reach
 
-            if reversed_depth and near_a_player:
+            if near_a_player and (reversed_depth or index in vertical):
                 kind = EventType.HIT
-                # A hit is most credible when both signals agree: the ball
-                # turned around in depth *and* someone was there to do it.
+                # Most credible when both signals agree: the ball turned around
+                # in depth *and* someone was within racket reach of it.
                 confidence = sample.confidence * (
-                    1.0 - min(distance / hit_radius, 1.0) * 0.3
+                    1.0 - min(distance / hit_reach, 1.0) * 0.3
                 )
+                if not reversed_depth:
+                    confidence *= 0.8
             elif index in vertical and not near_a_player:
                 kind = EventType.BOUNCE
                 confidence = sample.confidence
@@ -165,6 +187,12 @@ def detect_events(
 
             if sample.interpolated:
                 confidence *= 0.6
+
+            # A bounce lies on the court plane by definition, so its projected
+            # position has to be near the court. Far outside means the ball was
+            # still airborne and this reading cannot support an in/out call.
+            if kind is EventType.BOUNCE and not _plausible_landing(sample.court):
+                confidence *= 0.4
 
             events.append(
                 BallEvent(
@@ -182,23 +210,45 @@ def detect_events(
 
 
 def _nearest_player(
-    ball_court: np.ndarray,
+    ball_image: np.ndarray,
     frame: int,
-    player_positions: dict[int, dict[int, np.ndarray]] | None,
+    player_boxes: dict[int, dict[int, tuple[float, float, float, float]]] | None,
 ) -> tuple[int | None, float | None]:
-    if not player_positions:
+    """Closest player to the ball in the image, in box-height units.
+
+    Returns ``(track_id, distance)`` where 1.0 means "one player height away".
+    Distance is to the nearest edge of the box rather than its centre, so a
+    ball at the feet and a ball at the head both read as close.
+    """
+    if not player_boxes:
         return None, None
+
     best_id, best_distance = None, float("inf")
-    for player_id, by_frame in player_positions.items():
-        position = by_frame.get(frame)
-        if position is None:
+    for track_id, by_frame in player_boxes.items():
+        box = by_frame.get(frame)
+        if box is None:
             continue
-        distance = float(np.linalg.norm(np.asarray(position) - ball_court))
+        x1, y1, x2, y2 = box
+        height = max(y2 - y1, 1.0)
+        dx = max(x1 - ball_image[0], 0.0, ball_image[0] - x2)
+        dy = max(y1 - ball_image[1], 0.0, ball_image[1] - y2)
+        distance = float(np.hypot(dx, dy) / height)
         if distance < best_distance:
-            best_id, best_distance = player_id, distance
+            best_id, best_distance = track_id, distance
+
     if best_id is None:
         return None, None
     return best_id, best_distance
+
+
+def _plausible_landing(court_pt: np.ndarray) -> bool:
+    """Whether a court-space point could be a real landing spot.
+
+    Generous - 4 m of run-off past every line - because this only needs to
+    catch the airborne-projection artefact, which overshoots by far more.
+    """
+    x, y = float(court_pt[0]), float(court_pt[1])
+    return -4.0 <= x <= 14.97 and -4.0 <= y <= 27.77
 
 
 def crossed_net(before: np.ndarray, after: np.ndarray) -> bool:
