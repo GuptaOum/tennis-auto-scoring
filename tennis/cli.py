@@ -19,6 +19,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from tennis import analysis as analysis_module
 from tennis import rally as rally_module
 from tennis import video
 from tennis.bounce import EventType, detect_events
@@ -221,6 +222,7 @@ def run(args: argparse.Namespace) -> dict:
     events = detect_events(trajectory, player_boxes=player_boxes, fps=info.fps)
     match, rallies = rally_module.score_match(events, fps=info.fps)
     rally_summary = rally_module.summarise(rallies, fps=info.fps)
+    analysis = analysis_module.summarise(player_track, ball_track, info.fps)
     report = {
         "input": {
             "path": str(info.path),
@@ -262,8 +264,14 @@ def run(args: argparse.Namespace) -> dict:
             "hits": sum(1 for e in events if e.type is EventType.HIT),
         },
         "rallies": rally_summary,
+        "analysis": analysis,
         "score": match.summary(),
     }
+
+    for player in analysis["players"]:
+        player["coverage"] = analysis_module.render_coverage(
+            analysis_module.court_coverage(player_track, player["track_id"])
+        )
 
     report["points"] = [
         {
@@ -300,6 +308,20 @@ def main(argv: list[str] | None = None) -> int:
     events = report["events"]
     rallies = report["rallies"]
     print(f"events             : {events['bounces']} bounces, {events['hits']} hits")
+
+    print("\n--- players ---")
+    for player in report["analysis"]["players"]:
+        print(
+            f"player {player['track_id']} ({player['side']} side): "
+            f"{player['distance_covered_m']} m covered, "
+            f"avg {player['average_speed_kmh']} km/h, "
+            f"top {player['top_speed_kmh']} km/h, "
+            f"{player['net_approaches']} net approaches"
+        )
+        for line in player["coverage"]:
+            print(f"    {line}")
+
+    print("\n--- scoring ---")
     print(
         f"rallies            : {rallies['rallies_found']} found, "
         f"{rallies['points_decided']} scored, "
@@ -312,8 +334,11 @@ def main(argv: list[str] | None = None) -> int:
                 f"player {point['winner']} ({point['reason']}, "
                 f"confidence {point['confidence']})"
             )
-    print(f"SCORE              : {report['score']['scoreline']}")
-    print(f"report             : {Path(args.out) / 'report.json'}")
+    if rallies["points_decided"]:
+        print(f"score              : {report['score']['scoreline']}")
+    else:
+        print("score              : no completed point found in this clip")
+    print(f"\nreport             : {Path(args.out) / 'report.json'}")
     return 0
 
 
