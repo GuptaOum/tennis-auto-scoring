@@ -19,9 +19,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from tennis import rally as rally_module
 from tennis import video
+from tennis.bounce import EventType, detect_events
 from tennis.court import COURT_LINES, calibrate
 from tennis.detect import BallDetector, CourtDetector, PlayerDetector
+from tennis.trajectory import from_detections
 
 # BGR
 GREEN = (0, 220, 0)
@@ -132,6 +135,7 @@ def run(args: argparse.Namespace) -> dict:
     calibrations: list[dict] = []
     ball_track: list[dict] = []
     player_track: list[dict] = []
+    player_positions: dict[int, dict[int, np.ndarray]] = {}
     processed = 0
     started = time.time()
 
@@ -170,8 +174,8 @@ def run(args: argparse.Namespace) -> dict:
                 ball_track.append(
                     {
                         "frame": index,
-                        "x_m": round(float(court_pt[0]), 3),
-                        "y_m": round(float(court_pt[1]), 3),
+                        "image": [float(v) for v in ball.centre],
+                        "court": [float(court_pt[0]), float(court_pt[1])],
                         "confidence": round(ball.confidence, 3),
                     }
                 )
@@ -187,6 +191,10 @@ def run(args: argparse.Namespace) -> dict:
                             "y_m": round(float(court_pt[1]), 3),
                         }
                     )
+                    if player.track_id is not None:
+                        player_positions.setdefault(player.track_id, {})[index] = (
+                            court_pt
+                        )
 
             if writer is not None:
                 writer.write(
@@ -203,6 +211,14 @@ def run(args: argparse.Namespace) -> dict:
 
     elapsed = time.time() - started
     reliable = [c for c in calibrations if c.get("reliable")]
+
+    # Everything above is per-frame detection. Everything below turns that into
+    # a score: trajectory -> bounces and hits -> rallies -> points.
+    trajectory = from_detections(ball_track)
+    events = detect_events(trajectory, player_positions=player_positions,
+                           fps=info.fps)
+    match, rallies = rally_module.score_match(events, fps=info.fps)
+    rally_summary = rally_module.summarise(rallies, fps=info.fps)
     report = {
         "input": {
             "path": str(info.path),
@@ -239,14 +255,25 @@ def run(args: argparse.Namespace) -> dict:
             ),
             "player_observations": len(player_track),
         },
-        "scoring": {
-            "status": "not implemented yet",
-            "note": (
-                "bounce detection, rally segmentation and point attribution are "
-                "the next stage; no score is reported rather than a guessed one"
-            ),
+        "events": {
+            "bounces": sum(1 for e in events if e.type is EventType.BOUNCE),
+            "hits": sum(1 for e in events if e.type is EventType.HIT),
         },
+        "rallies": rally_summary,
+        "score": match.summary(),
     }
+
+    report["points"] = [
+        {
+            "winner": r.winner,
+            "reason": r.reason,
+            "confidence": r.confidence,
+            "start_frame": r.start_frame,
+            "end_frame": r.end_frame,
+            "shots": r.shot_count,
+        }
+        for r in rallies
+    ]
 
     (out_dir / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     (out_dir / "ball_track.json").write_text(
@@ -268,6 +295,22 @@ def main(argv: list[str] | None = None) -> int:
         f"median error {court['median_reprojection_error_px']} px"
     )
     print(f"ball detected in   : {detection['ball_detection_rate']:.1%} of frames")
+    events = report["events"]
+    rallies = report["rallies"]
+    print(f"events             : {events['bounces']} bounces, {events['hits']} hits")
+    print(
+        f"rallies            : {rallies['rallies_found']} found, "
+        f"{rallies['points_decided']} scored, "
+        f"{rallies['points_undecided']} undecided"
+    )
+    for point in report["points"]:
+        if point["winner"] is not None:
+            print(
+                f"   f{point['start_frame']}-{point['end_frame']}: "
+                f"player {point['winner']} ({point['reason']}, "
+                f"confidence {point['confidence']})"
+            )
+    print(f"SCORE              : {report['score']['scoreline']}")
     print(f"report             : {Path(args.out) / 'report.json'}")
     return 0
 
