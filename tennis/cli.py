@@ -55,6 +55,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="auto",
         help="cuda, cpu, or auto (default: use the GPU when one is present)",
     )
+    parser.add_argument(
+        "--ball-imgsz",
+        type=int,
+        default=960,
+        help="inference resolution for the ball detector (default 960; 640 "
+             "halves the detection rate on 1080p footage)",
+    )
     parser.add_argument("--player-model", default="yolov8x.pt")
     parser.add_argument("--ball-model", default="models/yolo5_last.pt")
     parser.add_argument("--court-model", default="models/keypoints_model.pth")
@@ -125,7 +132,8 @@ def run(args: argparse.Namespace) -> dict:
 
     print("loading models...", flush=True)
     players_model = PlayerDetector(args.player_model, device=device)
-    ball_model = BallDetector(args.ball_model, device=device)
+    ball_model = BallDetector(args.ball_model, device=device,
+                              imgsz=args.ball_imgsz)
     court_model = CourtDetector(args.court_model, device=device)
 
     writer = None

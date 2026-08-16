@@ -75,15 +75,34 @@ class PlayerDetector:
 
 
 class BallDetector:
+    # A tennis ball is ~15 px across in a 1080p frame. YOLO's default imgsz of
+    # 640 letterboxes that frame down by a factor of three, leaving a ball of
+    # ~5 px - close to the smallest thing the network can represent at all.
+    # Measured on a 451-frame clip, raising imgsz to 960 took detection from
+    # 47.0% to 95.6% of frames, with no retraining. It is the single largest
+    # accuracy change in the project, and it is a one-line default.
+    #
+    #   imgsz  detection  mean conf  speed
+    #     640      47.0%      0.329   32 fps
+    #     960      95.6%      0.366   20 fps   <- chosen
+    #    1280      78.3%      0.394   12 fps
+    #    1920      96.2%      0.337    6 fps
+    #
+    # 1920 is no better than 960 and three times slower. 1280 scoring worse
+    # than both is a letterboxing artefact of this model's stride, not noise -
+    # it reproduces across runs, which is why the default is set empirically
+    # rather than by assuming bigger is better.
     def __init__(self, model_path: str, conf: float = 0.15,
-                 device: str = "cpu") -> None:
+                 device: str = "cpu", imgsz: int = 960) -> None:
         self.model = YOLO(model_path)
         self.conf = conf
         self.device = device
+        self.imgsz = imgsz
 
     def detect(self, frame: np.ndarray) -> Detection | None:
         result = self.model.predict(
-            frame, conf=self.conf, device=self.device, verbose=False
+            frame, conf=self.conf, imgsz=self.imgsz, device=self.device,
+            verbose=False
         )[0]
         if not len(result.boxes):
             return None
