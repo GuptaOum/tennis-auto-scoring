@@ -1,0 +1,38 @@
+# Model weights (download separately — see README)
+models/*.pt
+models/*.pth
+
+# Videos: inputs are yours, outputs are reproducible
+input_videos/*
+!input_videos/.gitkeep
+output_videos/*
+!output_videos/.gitkeep
+
+# Ultralytics run artifacts
+runs/
+
+# Datasets (re-downloadable from Roboflow)
+training/tennis-ball-detection-*/
+training/data/
+*.zip
+
+# Cached detections
+tracker_stubs/*.pkl
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+*.egg-info/
+.pytest_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
