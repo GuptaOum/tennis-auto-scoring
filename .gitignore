@@ -36,3 +36,5 @@ Thumbs.db
 
 # Secrets
 .env
+output/
+yolov8x.pt
