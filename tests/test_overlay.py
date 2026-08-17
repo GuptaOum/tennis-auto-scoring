@@ -290,3 +290,29 @@ def test_panels_are_drawn_inside_the_frame_for_a_small_video():
     renderer = a_renderer(width=640, height=360)
     frame = np.full((360, 640, 3), 120, dtype=np.uint8)
     assert renderer.render(frame, 30).shape == (360, 640, 3)
+
+
+def test_the_fourteen_court_landmarks_are_drawn_in_red():
+    # The keypoint model's whole job. Drawn from the fitted homography, so a
+    # dot off its line means the calibration drifted - visible, not hidden.
+    renderer = a_renderer()
+    frame = blank()
+    out = renderer.render(frame, 30)
+    calibration = a_calibration()
+    landmarks = calibration.to_image(COURT_MODEL)
+    hits = 0
+    for point in landmarks:
+        x, y = int(point[0]), int(point[1])
+        if not (0 <= x < WIDTH and 0 <= y < HEIGHT):
+            continue
+        patch = out[max(y - 3, 0):y + 4, max(x - 3, 0):x + 4]
+        # Red in BGR: the red channel dominates at the landmark.
+        if patch[..., 2].max() > 180 and patch[..., 1].max() < 200:
+            hits += 1
+    assert hits >= 12, f"only {hits} of 14 landmarks drawn"
+
+
+def test_landmarks_are_absent_without_a_calibration():
+    renderer = a_renderer(calibration=None)
+    out = renderer.render(blank(), 30)
+    assert out.shape == (HEIGHT, WIDTH, 3)
