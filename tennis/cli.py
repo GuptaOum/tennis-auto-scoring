@@ -2,10 +2,13 @@
 
     python -m tennis.cli --input input_videos/match.mp4 --out output/
 
-Runs detection over the video, calibrates the court, and writes an annotated
-video plus a JSON report. Bounce detection, rally segmentation and point
-attribution are not wired in yet - the report says so explicitly rather than
-emitting a placeholder score.
+Two passes over the video. The first detects players, ball and court and turns
+that into events, rallies and a score. The second re-decodes the video and
+draws the annotated overlay, which can only happen once the first pass is done:
+a bounce is identifiable only from the frames after it, so the score at a given
+frame is not knowable while that frame is being detected.
+
+Outputs land in --out: annotated.mp4, report.html, report.json, ball_track.json.
 """
 
 from __future__ import annotations
@@ -16,26 +19,19 @@ import sys
 import time
 from pathlib import Path
 
-import cv2
 import numpy as np
 
 from tennis import analysis as analysis_module
 from tennis import placement as placement_module
+from tennis import overlay
 from tennis import rally as rally_module
 from tennis import report as report_module
 from tennis import serve as serve_module
 from tennis import video
 from tennis.bounce import EventType, detect_events
-from tennis.court import COURT_LINES, calibrate
+from tennis.court import calibrate
 from tennis.detect import BallDetector, CourtDetector, PlayerDetector
 from tennis.trajectory import from_detections
-
-# BGR
-GREEN = (0, 220, 0)
-YELLOW = (0, 255, 255)
-RED = (0, 0, 255)
-WHITE = (255, 255, 255)
-
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -79,49 +75,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def draw_overlay(
-    frame: np.ndarray,
-    players: list,
-    ball,
-    keypoints: np.ndarray | None,
-    calib,
-    frame_index: int,
-) -> np.ndarray:
-    canvas = frame.copy()
-
-    if keypoints is not None:
-        for index, (x, y) in enumerate(keypoints):
-            cv2.circle(canvas, (int(x), int(y)), 4, RED, -1)
-            cv2.putText(canvas, str(index), (int(x) + 6, int(y) - 6),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, RED, 1)
-        for a, b in COURT_LINES:
-            cv2.line(canvas, tuple(keypoints[a].astype(int)),
-                     tuple(keypoints[b].astype(int)), WHITE, 1)
-
-    for player in players:
-        x1, y1, x2, y2 = (int(v) for v in player.bbox)
-        cv2.rectangle(canvas, (x1, y1), (x2, y2), GREEN, 2)
-        label = f"P{player.track_id}" if player.track_id else "P?"
-        if calib is not None:
-            court_pt = calib.to_court(player.feet)
-            label += f"  ({court_pt[0]:.1f}, {court_pt[1]:.1f}) m"
-        cv2.putText(canvas, label, (x1, y1 - 8),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, GREEN, 2)
-
-    if ball is not None:
-        x1, y1, x2, y2 = (int(v) for v in ball.bbox)
-        cv2.rectangle(canvas, (x1, y1), (x2, y2), YELLOW, 2)
-        cv2.putText(canvas, f"ball {ball.confidence:.2f}", (x1, y1 - 8),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, YELLOW, 1)
-
-    status = f"frame {frame_index}"
-    if calib is not None:
-        flag = "OK" if calib.is_reliable else "UNRELIABLE"
-        status += f" | court {flag} ({calib.reprojection_error:.1f} px)"
-    cv2.putText(canvas, status, (12, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, WHITE, 2)
-    return canvas
-
-
 def run(args: argparse.Namespace) -> dict:
     info = video.probe(args.input)
     print(f"input: {info}", flush=True)
@@ -144,11 +97,11 @@ def run(args: argparse.Namespace) -> dict:
                               imgsz=args.ball_imgsz)
     court_model = CourtDetector(args.court_model, device=device)
 
-    writer = None
-    if not args.no_video:
-        writer = video.VideoWriter(
-            out_dir / "annotated.mp4", info.fps, info.width, info.height
-        )
+    # No writer during detection. The annotated video is rendered in a second
+    # pass, because the things worth drawing - the score, the reason a rally
+    # ended, whether a bounce was in - cannot be known while the frame is being
+    # detected. A bounce is a local maximum in projected court y, identifiable
+    # only once the frames after it exist. See tennis/overlay.py.
 
     calib = None
     keypoints = None
@@ -160,83 +113,74 @@ def run(args: argparse.Namespace) -> dict:
     processed = 0
     started = time.time()
 
-    try:
-        for index, frame in video.frames(args.input, args.start, args.limit):
-            recalibrate = args.recalibrate_every and (
-                processed % args.recalibrate_every == 0
-            )
-            if keypoints is None or recalibrate:
-                keypoints = court_model.detect(frame)
-                try:
-                    candidate = calibrate(keypoints, frame_index=index)
-                    # Keep the previous calibration if this frame's is worse -
-                    # a player crossing a line can briefly wreck the keypoints,
-                    # and a fixed camera means the old matrix is still valid.
-                    if calib is None or candidate.is_reliable:
-                        calib = candidate
-                    calibrations.append(
-                        {
-                            "frame": index,
-                            "reprojection_error_px": round(
-                                candidate.reprojection_error, 2
-                            ),
-                            "inliers": candidate.inlier_count,
-                            "reliable": candidate.is_reliable,
-                        }
-                    )
-                except ValueError as exc:
-                    calibrations.append({"frame": index, "error": str(exc)})
-
-            detected_players = players_model.detect(frame)
-            ball = ball_model.detect(frame)
-
-            if ball is not None and calib is not None:
-                court_pt = calib.to_court(ball.centre)
-                ball_track.append(
+    for index, frame in video.frames(args.input, args.start, args.limit):
+        recalibrate = args.recalibrate_every and (
+            processed % args.recalibrate_every == 0
+        )
+        if keypoints is None or recalibrate:
+            keypoints = court_model.detect(frame)
+            try:
+                candidate = calibrate(keypoints, frame_index=index)
+                # Keep the previous calibration if this frame's is worse -
+                # a player crossing a line can briefly wreck the keypoints,
+                # and a fixed camera means the old matrix is still valid.
+                if calib is None or candidate.is_reliable:
+                    calib = candidate
+                calibrations.append(
                     {
                         "frame": index,
-                        "image": [float(v) for v in ball.centre],
-                        "court": [float(court_pt[0]), float(court_pt[1])],
-                        "confidence": round(ball.confidence, 3),
+                        "reprojection_error_px": round(
+                            candidate.reprojection_error, 2
+                        ),
+                        "inliers": candidate.inlier_count,
+                        "reliable": candidate.is_reliable,
                     }
                 )
+            except ValueError as exc:
+                calibrations.append({"frame": index, "error": str(exc)})
 
-            if calib is not None:
-                for player in detected_players:
-                    court_pt = calib.to_court(player.feet)
-                    player_track.append(
-                        {
-                            "frame": index,
-                            "track_id": player.track_id,
-                            "x_m": round(float(court_pt[0]), 3),
-                            "y_m": round(float(court_pt[1]), 3),
-                        }
-                    )
-                    if player.track_id is not None:
-                        # Image-space box, not the court position: hit detection
-                        # needs proximity, and an airborne ball's court
-                        # coordinate is projected metres from where it truly is.
-                        player_boxes.setdefault(player.track_id, {})[index] = (
-                            player.bbox
-                        )
-                        # Court-space feet, for shot origin. Valid because a
-                        # player stands on the plane the homography maps.
-                        player_boxes_court.setdefault(player.track_id, {})[
-                            index
-                        ] = court_pt
+        detected_players = players_model.detect(frame)
+        ball = ball_model.detect(frame)
 
-            if writer is not None:
-                writer.write(
-                    draw_overlay(frame, detected_players, ball, keypoints, calib, index)
+        if ball is not None and calib is not None:
+            court_pt = calib.to_court(ball.centre)
+            ball_track.append(
+                {
+                    "frame": index,
+                    "image": [float(v) for v in ball.centre],
+                    "court": [float(court_pt[0]), float(court_pt[1])],
+                    "confidence": round(ball.confidence, 3),
+                }
+            )
+
+        if calib is not None:
+            for player in detected_players:
+                court_pt = calib.to_court(player.feet)
+                player_track.append(
+                    {
+                        "frame": index,
+                        "track_id": player.track_id,
+                        "x_m": round(float(court_pt[0]), 3),
+                        "y_m": round(float(court_pt[1]), 3),
+                    }
                 )
+                if player.track_id is not None:
+                    # Image-space box, not the court position: hit detection
+                    # needs proximity, and an airborne ball's court
+                    # coordinate is projected metres from where it truly is.
+                    player_boxes.setdefault(player.track_id, {})[index] = (
+                        player.bbox
+                    )
+                    # Court-space feet, for shot origin. Valid because a
+                    # player stands on the plane the homography maps.
+                    player_boxes_court.setdefault(player.track_id, {})[
+                        index
+                    ] = court_pt
 
-            processed += 1
-            if processed % 25 == 0:
-                rate = processed / (time.time() - started)
-                print(f"  {processed} frames ({rate:.1f} fps)", flush=True)
-    finally:
-        if writer is not None:
-            writer.close()
+        processed += 1
+        if processed % 25 == 0:
+            rate = processed / (time.time() - started)
+            print(f"  {processed} frames ({rate:.1f} fps)", flush=True)
 
     elapsed = time.time() - started
     reliable = [c for c in calibrations if c.get("reliable")]
@@ -334,6 +278,38 @@ def run(args: argparse.Namespace) -> dict:
     )
     if not args.no_html:
         report_module.write(report, out_dir / "report.html")
+
+    if not args.no_video:
+        print("rendering annotated video...", flush=True)
+        render_started = time.time()
+        renderer = overlay.Renderer(
+            width=info.width,
+            height=info.height,
+            fps=info.fps,
+            ball_track=ball_track,
+            player_boxes=player_boxes,
+            player_court=player_boxes_court,
+            events=events,
+            rallies=rallies,
+            match=match,
+            calibration=calib,
+            source_name=Path(args.input).name,
+        )
+        frames_written = overlay.render_video(
+            args.input,
+            out_dir / "annotated.mp4",
+            renderer,
+            start=args.start,
+            limit=args.limit,
+        )
+        report["performance"]["render_seconds"] = round(
+            time.time() - render_started, 1
+        )
+        report["performance"]["frames_rendered"] = frames_written
+        # Rewritten so the render timing lands in the JSON too.
+        (out_dir / "report.json").write_text(
+            json.dumps(report, indent=2), encoding="utf-8"
+        )
     return report
 
 
