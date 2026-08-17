@@ -22,6 +22,7 @@ import numpy as np
 from tennis import analysis as analysis_module
 from tennis import placement as placement_module
 from tennis import rally as rally_module
+from tennis import report as report_module
 from tennis import serve as serve_module
 from tennis import video
 from tennis.bounce import EventType, detect_events
@@ -69,6 +70,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--court-model", default="models/keypoints_model.pth")
     parser.add_argument(
         "--no-video", action="store_true", help="write the JSON report only"
+    )
+    parser.add_argument(
+        "--no-html",
+        action="store_true",
+        help="skip the HTML report (report.html is written by default)",
     )
     return parser.parse_args(argv)
 
@@ -303,9 +309,12 @@ def run(args: argparse.Namespace) -> dict:
     }
 
     for player in analysis["players"]:
-        player["coverage"] = analysis_module.render_coverage(
-            analysis_module.court_coverage(player_track, player["track_id"])
-        )
+        grid = analysis_module.court_coverage(player_track, player["track_id"])
+        player["coverage"] = analysis_module.render_coverage(grid)
+        # Kept raw as well as rendered: the HTML report draws the grid over a
+        # court plan, and shading characters cannot be un-rendered back into
+        # counts. Costs 36 integers per player.
+        player["coverage_grid"] = grid
 
     report["points"] = [
         {
@@ -323,6 +332,8 @@ def run(args: argparse.Namespace) -> dict:
     (out_dir / "ball_track.json").write_text(
         json.dumps(ball_track, indent=2), encoding="utf-8"
     )
+    if not args.no_html:
+        report_module.write(report, out_dir / "report.html")
     return report
 
 
@@ -422,6 +433,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("score              : no completed point found in this clip")
     print(f"\nreport             : {Path(args.out) / 'report.json'}")
+    if not args.no_html:
+        print(f"html report        : {Path(args.out) / 'report.html'}")
     return 0
 
 

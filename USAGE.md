@@ -11,8 +11,26 @@ Results appear in `output/`:
 | file | what it is |
 |---|---|
 | `annotated.mp4` | your video with players, ball, court and live positions drawn on |
+| `report.html` | the readable match report — open it in any browser |
 | `report.json` | every number the run produced |
 | `ball_track.json` | the ball's path, frame by frame, in court metres |
+
+`report.html` is the one to actually look at. It is a single self-contained
+file — no internet, no dependencies — so it can be emailed, put on a USB
+stick, or committed next to the video and still render years later. It shows
+the scoreline, a timeline of every point against the clip's real duration, a
+scale plan of the court with every ball landing and serve plotted in metres,
+per-player movement and coverage heatmaps, and shot-placement breakdowns.
+
+Anything the run could not measure is said out loud rather than shown as a
+zero: an uncalibrated court, a poor ball-detection rate, and low-confidence
+points all raise a banner at the top.
+
+Regenerate it from an existing run without re-running inference:
+
+```bash
+python -m tennis.report output/report.json -o output/report.html
+```
 
 The terminal prints a readable summary: distance covered, average and top
 speed, net approaches, a court-occupancy grid per player, and the scoring
@@ -81,6 +99,7 @@ analysis but no score, because no point finished.
 | `--limit N` | stop after N frames |
 | `--start N` | begin at frame N |
 | `--no-video` | skip the annotated video, write JSON only (much faster) |
+| `--no-html` | skip `report.html` (it is written by default) |
 | `--device cuda` | force GPU (default `auto` detects one) |
 | `--recalibrate-every N` | re-detect court keypoints every N frames (default 30) |
 
