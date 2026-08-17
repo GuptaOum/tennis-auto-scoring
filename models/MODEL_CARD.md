@@ -21,45 +21,31 @@ turns a match video into an automatic score.
 
 ## What is in this repo
 
-The pipeline runs **three** models per frame. Two of them are here:
+The pipeline runs **three** models per frame. Two are here:
 
 | file | stage | whose | status |
 |---|---|---|---|
 | `ball_finetuned.pt` | ball detection | **fine-tuned by me** | here, 50 MB |
-| `third_party/yolov8x.pt` | person detection | Ultralytics, stock COCO | here as an unmodified mirror, 131 MB |
-| *court keypoints* | 14 court landmarks | — | **not yet — see below** |
-
-The third stage, court-keypoint detection, is the one this repo is still missing.
-The project currently uses the upstream author's ResNet-50 for it, which carries
-no licence and so cannot be redistributed. **A replacement trained by me is
-planned**, on the MIT-licensed
-[TennisCourtDetector](https://github.com/yastrebksv/TennisCourtDetector) dataset
-(8,841 images), and will be published as its own repo with its own PCK metrics —
-it is a keypoint regressor rather than a detector and does not belong in this
-one. Details in [The court keypoint model](#the-court-keypoint-model).
+| `third_party/yolov8x.pt` | person detection | Ultralytics, stock COCO | mirrored, 131 MB |
+| *court keypoints* | 14 court landmarks | — | **planned** |
 
 ## Why this exists
 
-A tennis ball is roughly 15 pixels across in a 1080p frame. That is close to
-the smallest thing a detector of this architecture can represent at all, and it
-is the reason off-the-shelf weights do poorly on tennis: at YOLO's default
-`imgsz=640`, a 1080p frame is letterboxed down by a factor of three, leaving a
-ball of about 5 pixels.
+A tennis ball is ~15 px across in a 1080p frame — near the smallest thing this
+architecture can represent. At YOLO's default `imgsz=640` a 1080p frame is
+letterboxed down 3×, leaving a ball of ~5 px. That is why off-the-shelf weights
+do poorly on tennis.
 
-Two changes account for essentially all of the gain, and only one of them is
-training:
+Two changes account for nearly all the gain, and only one is training:
 
-1. **Serve at 960px.** On a 451-frame clip, raising inference resolution from
-   640 to 960 took detection from 47.0% to 95.6% of frames *with no retraining
-   at all*.
-2. **Train at the resolution you serve at.** This model was fine-tuned at
-   `imgsz=960`, which is why a 25.9M-parameter YOLOv8m beats the 86M-parameter
-   YOLOv5l6u baseline it replaced.
+1. **Serve at 960px.** On a 451-frame clip, going from 640 to 960 took detection
+   from 47.0% to 95.6% of frames *with no retraining at all*.
+2. **Train at the resolution you serve at.** Fine-tuned at `imgsz=960`, which is
+   why this 25.9M-param YOLOv8m beats the 86M-param YOLOv5l6u it replaced.
 
 ## Results
 
-Fine-tuned vs. the baseline weights, same validation set, both evaluated at
-`imgsz=960`:
+Same validation set, both evaluated at `imgsz=960`:
 
 | metric | baseline (YOLOv5l6u, 86M) | this model (YOLOv8m, 25.9M) |
 |---|---|---|
@@ -68,26 +54,21 @@ Fine-tuned vs. the baseline weights, same validation set, both evaluated at
 | precision | 0.633 | **0.925** |
 | recall | 0.581 | **0.871** |
 
-On a 15-second amateur clip the system had never seen, the ball is found in
-**98.2%** of frames. Throughput is 9.3 fps end-to-end on a Tesla T4 (that
-figure is the whole pipeline — players, ball and court — not this model alone).
+On an unseen 15-second amateur clip the ball is found in **98.2%** of frames.
+End-to-end pipeline throughput is 9.3 fps on a Tesla T4.
 
 ### Resolution sweep
 
-Inference resolution matters more than anything else here, and not
-monotonically:
-
-| imgsz | detection rate | mean confidence | speed |
+| imgsz | detection | mean conf | speed |
 |---|---|---|---|
 | 640 | 47.0% | 0.329 | 32 fps |
 | **960** | **95.6%** | 0.366 | 20 fps |
 | 1280 | 78.3% | 0.394 | 12 fps |
 | 1920 | 96.2% | 0.337 | 6 fps |
 
-1920 gains nothing over 960 at three times the cost. **1280 scoring worse than
-both is not noise** — it reproduces across runs, and is a letterboxing artefact
-of this model's stride. Pick the resolution empirically rather than assuming
-bigger is better.
+1920 gains nothing over 960 at 3× the cost. **1280 scoring worse than both is
+not noise** — it reproduces, and is a letterboxing artefact of this model's
+stride. Choose resolution empirically, not by assuming bigger is better.
 
 ## Usage
 
@@ -105,108 +86,75 @@ if len(result.boxes):
     print(best.xyxy.tolist()[0], float(best.conf.item()))
 ```
 
-A low confidence threshold (0.15) is deliberate. Missing the ball entirely
-costs more downstream than a spurious box does, because a trajectory can be
-smoothed but a gap cannot be filled.
+The low threshold (0.15) is deliberate: a missed ball costs more downstream than
+a spurious box, because a trajectory can be smoothed but a gap cannot be filled.
 
-## Intended use and limits
+## Limits
 
-Built for footage from an **elevated camera behind the baseline** — broadcast
-framing. It has not been evaluated on true overhead or drone angles.
+Built for an **elevated camera behind the baseline** (broadcast framing); not
+evaluated on overhead or drone angles.
 
-- **It detects, it does not adjudicate.** The parent project never uses this to
-  make line calls. A single camera cannot resolve whether a ball caught a line,
-  and points are scored from rally outcomes instead — double bounce, landed out,
-  failed to cross the net.
-- **No 3D position or ball speed.** A homography maps the court *plane*, so an
-  airborne ball projects to metres beyond where it truly is. Recovering real
-  ball speed from one camera was attempted, measured, and abandoned; it needs a
-  second camera or a known vertical reference.
-- Trained on a modest dataset and evaluated on a small validation set. Treat the
-  metrics above as evidence it works on this kind of footage, not as a general
-  benchmark claim.
+- **It detects, it does not adjudicate.** The parent project makes no line calls —
+  one camera cannot resolve whether a ball caught a line. Points are scored from
+  rally outcomes: double bounce, landed out, failed to cross the net.
+- **No ball speed or 3D position.** A homography maps the court *plane*, so an
+  airborne ball projects beyond where it truly is. Recovering speed from one
+  camera was attempted, measured and abandoned.
+- Modest training and validation sets. Treat the metrics as evidence for this
+  kind of footage, not a general benchmark.
 
-## The rest of the pipeline
-
-This model is one of three that
-[tennis-auto-scoring](https://github.com/GuptaOum/tennis-auto-scoring) runs per
-frame. **Neither of the other two is my training**, and they are listed here so
-the system is reproducible and so credit lands where it belongs:
-
-| stage | model | source | in this repo |
-|---|---|---|---|
-| ball detection | YOLOv8m @ 960px | fine-tuned by me | yes |
-| person detection | `yolov8x.pt`, stock COCO | [Ultralytics](https://github.com/ultralytics/ultralytics), AGPL-3.0 | yes, mirrored |
-| court keypoints | ResNet-50, 14 landmarks | [abdullahtarek/tennis_analysis](https://github.com/abdullahtarek/tennis_analysis) | no — replacement planned |
-
-### The player detector
+## The person detector
 
 `third_party/yolov8x.pt` is an **unmodified mirror** of Ultralytics' stock COCO
-checkpoint, kept here only so a deployment can fetch every weight the pipeline
-needs from one place. It is not my training and not
-tennis-specific: it detects the 80 COCO classes, of which this project uses
-`person` (class 0), tracked across frames for stable identities. Redistributed
-under AGPL-3.0 per Ultralytics' licence.
+checkpoint, kept here only so a deployment can fetch every weight from one place.
+Not my training, not tennis-specific: it uses class 0 `person`, tracked for
+stable identities. AGPL-3.0 per Ultralytics' licence.
 
-#### Using the person detector for tennis
+**A person detector does not give you players** — and getting this wrong corrupts
+results silently. On a Vienna ATP clip it tracked **six** people: two players plus
+ball kids, line judges and the chair umpire, at court positions like `(14.6, 5.4)`
+and `(-3.4, -8.3)` m — outside a 10.97 × 23.77 m court. Unfiltered, all of them
+feed distance covered, speed, net approaches and coverage heatmaps, so a ball kid
+is reported as a player covering ground.
 
-Worth spelling out, because the naive version is wrong in a way that quietly
-corrupts every downstream number: **a person detector does not give you players.**
-
-On a Vienna ATP clip, stock `yolov8x.pt` tracked **six** people — the two
-players, plus ball kids at the net posts, line judges along the tramlines, and
-the chair umpire. Projected to court coordinates, the extras sat at positions
-like `(14.6, 5.4)` and `(-3.4, -8.3)` metres: outside a court that is 10.97 m
-wide and 23.77 m long.
-
-Left unfiltered that is not untidy, it is incorrect. Every one of those tracks
-feeds distance covered, average speed, net approaches and the coverage heatmaps,
-so a ball kid jogging to a post is reported as a player covering ground. It also
-breaks shot attribution, since a ball passing near a line judge looks like a
-shot struck by one.
-
-The fix uses two facts about singles tennis rather than a tuned threshold:
-
-1. **Players are on the court; everyone else is beside or behind it.** Once feet
-   are projected to metres through the court homography, distance from the court
-   separates them cleanly. The bounds are deliberately generous — 3 m wide, 5 m
-   behind — because a wide serve is returned from outside the tramline and deep
-   balls are retrieved well behind the baseline.
-2. **There is exactly one player per side of the net.** This settles the only
-   hard case, a ball kid standing behind a real player: they compete against
-   that player alone, and lose on distance from the court.
-
-With no court calibration there are no metres to measure, so it falls back to the
-two largest boxes and nothing downstream claims a distance. Implementation:
+The fix uses two facts about singles, not tuned thresholds: **players are on the
+court** once feet are projected to metres (bounds are generous — 3 m wide, 5 m
+behind — since wide serves are returned outside the tramline), and **there is one
+player per side of the net**, which settles the hard case of a ball kid standing
+behind a real player. Feet are projected, not box centres: the homography maps the
+plane, so a centre puts everyone a metre behind where they stand. See
 [`tennis/players.py`](https://github.com/GuptaOum/tennis-auto-scoring/blob/main/tennis/players.py).
 
-Feet, not box centres, are what get projected — the homography maps the court
-*plane*, so a position is only meaningful at ground level. Using the box centre
-places everyone about a metre behind where they stand.
+## The court keypoint model — planned
 
-### The court keypoint model
+The third stage is not here. The project currently uses the upstream author's
+ResNet-50 ([abdullahtarek/tennis_analysis](https://github.com/abdullahtarek/tennis_analysis)),
+which reaches a **0.29 px** median reprojection error on unseen courts — but that
+repository carries no licence file, so there is no grant to redistribute its
+weights.
 
-**Not mirrored here, and it cannot be.** It is the upstream author's work, and that repository carries no licence file — so there is
-no grant to redistribute its weights, whatever their quality. The project
-downloads it from the source instead. It is worth naming precisely because it is
-good: a 0.29 px median reprojection error on courts it has never seen, which is
-why this project deliberately does *not* retrain it.
+**A replacement trained by me is planned**, on the MIT-licensed
+[TennisCourtDetector](https://github.com/yastrebksv/TennisCourtDetector) dataset
+(8,841 images), via
+[`training/train_keypoints.py`](https://github.com/GuptaOum/tennis-auto-scoring/blob/main/training/train_keypoints.py).
+Two caveats: beating 0.29 px is unlikely, so the motivation is ownership and
+licensing rather than accuracy; and it will ship as its own repo, since a keypoint
+regressor needs its own metric (PCK, not mAP).
 
-Everything on top of those detections — homography calibration, ground-contact
-detection, rally segmentation, serve and fault logic, tennis scoring, shot
-placement, the HTML report and the annotated video — is mine.
+Everything above the detections — homography calibration, ground-contact
+detection, rally segmentation, serve and fault logic, scoring, shot placement, the
+HTML report and the annotated video — is mine.
 
 ## Training
 
-- Base weights: `yolov8m.pt`
-- `imgsz=960`, Tesla T4 (g4dn.xlarge)
-- Dataset: [tennis-ball-detection-6](https://universe.roboflow.com/) (Roboflow)
+- Base weights `yolov8m.pt`, `imgsz=960`, Tesla T4 (g4dn.xlarge)
+- Dataset: tennis-ball-detection-6 (Roboflow)
 - Script: [`training/train_ball.py`](https://github.com/GuptaOum/tennis-auto-scoring/blob/main/training/train_ball.py)
 
 ## License
 
-AGPL-3.0, inherited from Ultralytics YOLOv8. If you use this in a networked
-service, that license has requirements — check them before deploying.
+AGPL-3.0, inherited from Ultralytics YOLOv8. Networked-service use carries
+obligations — check them before deploying.
 
 ## Citation
 
