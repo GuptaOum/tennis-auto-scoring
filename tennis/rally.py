@@ -5,17 +5,27 @@ judges a line call to decide a point.** A single camera cannot do that
 reliably - Hawk-Eye needs ten calibrated ones - and a system that pretends
 otherwise produces confident nonsense.
 
-Instead a point is decided by what ended the rally, which is a far coarser and
+A point is decided instead by what *ended* the rally, a far coarser and
 therefore far more robust question:
 
   double bounce   the ball bounced twice on one side -> the other player wins
   bounced out     it bounced outside the court -> whoever hit it loses
   into the net    it never reached the other side -> whoever hit it loses
 
-Each outcome carries a confidence derived from the events behind it. Points
-the system is unsure about are reported as unsure rather than guessed, because
-a measured 85% with the failures visible is worth more than an unfalsifiable
-100%.
+Segmentation follows from the same idea. An earlier version split the event
+stream wherever there was a two-second silence, on the assumption that the ball
+goes untracked between points. That assumption died when ball detection went
+from 47% to 98%: with the ball visible almost continuously, the silences
+vanished and a whole clip collapsed into one rally.
+
+The fix is to stop inferring boundaries from absence and read them from
+structure. A rally ends at the event that ends it - the second bounce, the
+bounce landing out, the ball that never crosses. Those are the same events that
+decide the point, so segmentation and attribution are one pass, and a rally
+boundary can never disagree with the reason a point was awarded.
+
+A time gap is still honoured as a fallback, because a genuinely lost ball does
+mean play stopped. It is now the exception rather than the mechanism.
 """
 
 from __future__ import annotations
@@ -25,16 +35,18 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from tennis.bounce import BallEvent, EventType
-from tennis.court import NET_Y
 from tennis.scoring import Match, Player
 
-# A rally is over when the ball has been missing this long, in seconds. Real
-# rallies have sub-second gaps from missed detections; the walk back to the
-# baseline between points takes several seconds.
-RALLY_GAP_SECONDS = 2.0
+# A rally is abandoned when the ball has been missing this long, in seconds.
+# Only a fallback now: real rally ends are detected from their terminal event.
+RALLY_GAP_SECONDS = 2.5
 
 # Below this, a point is reported but flagged for review rather than trusted.
 LOW_CONFIDENCE = 0.6
+
+# A rally needs at least this many events before it is worth judging. Two
+# stray detections during a changeover should not become a point.
+MIN_EVENTS = 2
 
 
 @dataclass
@@ -55,8 +67,18 @@ class Rally:
         return sum(1 for e in self.events if e.type is EventType.HIT)
 
     @property
+    def bounce_count(self) -> int:
+        return sum(1 for e in self.events if e.type is EventType.BOUNCE)
+
+    @property
     def is_decided(self) -> bool:
         return self.winner is not None
+
+    @property
+    def serve_frame(self) -> int | None:
+        """The first hit of the rally - the serve."""
+        first = next((e for e in self.events if e.type is EventType.HIT), None)
+        return first.frame if first else None
 
 
 def _player_for_side(side: str) -> Player:
@@ -68,13 +90,76 @@ def _other(player: Player) -> Player:
     return 2 if player == 1 else 1
 
 
-def segment(
-    events: list[BallEvent], fps: float = 30.0, min_events: int = 3
-) -> list[Rally]:
-    """Group ball events into rallies, splitting on long silences.
+def _terminal_outcome(events: list[BallEvent]) -> tuple[Player, str, float] | None:
+    """Does this event sequence end with a point? If so, to whom and why.
 
-    ``min_events`` drops fragments too short to be a real point - a stray pair
-    of detections during a changeover should not become a rally.
+    Checked against the *tail* of the sequence, so a rally closes on the event
+    that ended it rather than at some later silence.
+    """
+    if len(events) < 2:
+        return None
+
+    last = events[-1]
+
+    # 1. Two bounces on the same side with no hit between them: not returned.
+    #    Checked first, being the least ambiguous ending in tennis.
+    if last.type is EventType.BOUNCE:
+        previous_bounce = None
+        for event in reversed(events[:-1]):
+            if event.type is EventType.HIT:
+                break
+            if event.type is EventType.BOUNCE:
+                previous_bounce = event
+                break
+        if previous_bounce is not None and previous_bounce.side == last.side:
+            loser = _player_for_side(last.side)
+            return (
+                _other(loser),
+                f"double bounce on the {last.side} side",
+                round(min(previous_bounce.confidence, last.confidence), 3),
+            )
+
+    # 2. The ball bounced outside the singles court. Whoever hit it last put it
+    #    out - so the ball must have been struck before it landed.
+    if last.type is EventType.BOUNCE and not last.in_bounds:
+        last_hit = next(
+            (e for e in reversed(events[:-1]) if e.type is EventType.HIT), None
+        )
+        if last_hit is not None:
+            loser = last_hit.by_player or _player_for_side(
+                "far" if last.side == "near" else "near"
+            )
+            return (
+                _other(loser),  # type: ignore[arg-type]
+                "ball landed outside the court",
+                round(min(last.confidence, last_hit.confidence), 3),
+            )
+
+    # 3. A hit, then a bounce on the hitter's own side: it never crossed.
+    if last.type is EventType.BOUNCE:
+        last_hit = next(
+            (e for e in reversed(events[:-1]) if e.type is EventType.HIT), None
+        )
+        if last_hit is not None and last_hit.side == last.side:
+            after_hit = [e for e in events if e.frame > last_hit.frame]
+            if all(e.side == last_hit.side for e in after_hit):
+                loser = last_hit.by_player or _player_for_side(last_hit.side)
+                return (
+                    _other(loser),  # type: ignore[arg-type]
+                    "ball did not cross the net",
+                    round(last_hit.confidence * 0.8, 3),
+                )
+
+    return None
+
+
+def segment(events: list[BallEvent], fps: float = 30.0) -> list[Rally]:
+    """Split the event stream into rallies, closing each at its ending.
+
+    One pass: accumulate events, and whenever the tail of the accumulator forms
+    a point-ending pattern, close the rally there and begin the next. Because
+    the same tail supplies the winner and the reason, a rally boundary can
+    never disagree with the point it produced.
     """
     if not events:
         return []
@@ -82,79 +167,55 @@ def segment(
     gap_frames = int(RALLY_GAP_SECONDS * fps)
     ordered = sorted(events, key=lambda e: e.frame)
 
-    groups: list[list[BallEvent]] = [[ordered[0]]]
-    for previous, current in zip(ordered, ordered[1:]):
-        if current.frame - previous.frame > gap_frames:
-            groups.append([current])
-        else:
-            groups[-1].append(current)
+    rallies: list[Rally] = []
+    current: list[BallEvent] = []
 
-    return [
-        Rally(start_frame=g[0].frame, end_frame=g[-1].frame, events=g)
-        for g in groups
-        if len(g) >= min_events
-    ]
+    def close(decided: tuple[Player, str, float] | None) -> None:
+        if len(current) < MIN_EVENTS:
+            current.clear()
+            return
+        rally = Rally(
+            start_frame=current[0].frame,
+            end_frame=current[-1].frame,
+            events=list(current),
+        )
+        if decided is not None:
+            rally.winner, rally.reason, rally.confidence = decided
+        else:
+            rally.reason = "rally ending could not be determined"
+        rallies.append(rally)
+        current.clear()
+
+    for event in ordered:
+        # A long silence means play stopped without a readable ending.
+        if current and event.frame - current[-1].frame > gap_frames:
+            close(_terminal_outcome(current))
+
+        current.append(event)
+
+        outcome = _terminal_outcome(current)
+        if outcome is not None:
+            close(outcome)
+
+    if current:
+        close(_terminal_outcome(current))
+
+    return rallies
 
 
 def attribute(rally: Rally) -> Rally:
-    """Decide who won a rally, and how confidently. Mutates and returns it."""
-    events = rally.events
-    if len(events) < 2:
-        rally.reason = "too few events to judge"
-        return rally
+    """Re-derive a rally's outcome from its events. Mutates and returns it.
 
-    bounces = [e for e in events if e.type is EventType.BOUNCE]
-    last_hit = next(
-        (e for e in reversed(events) if e.type is EventType.HIT), None
-    )
-
-    # 1. Two bounces on the same side with no hit between them: the ball was
-    #    not returned. Checked first because it is the least ambiguous ending.
-    for first, second in zip(bounces, bounces[1:]):
-        if first.side != second.side:
-            continue
-        between = [
-            e
-            for e in events
-            if first.frame < e.frame < second.frame and e.type is EventType.HIT
-        ]
-        if between:
-            continue
-        loser = _player_for_side(first.side)
-        rally.winner = _other(loser)
-        rally.reason = f"double bounce on the {first.side} side"
-        rally.confidence = round(min(first.confidence, second.confidence), 3)
-        return rally
-
-    # 2. The ball's last bounce landed outside the singles court. Whoever hit
-    #    it last put it out.
-    last_bounce = bounces[-1] if bounces else None
-    if last_bounce is not None and not last_bounce.in_bounds:
-        if last_hit is not None and last_hit.frame < last_bounce.frame:
-            loser = last_hit.by_player or _player_for_side(
-                "far" if last_bounce.side == "near" else "near"
-            )
-            rally.winner = _other(loser)  # type: ignore[arg-type]
-            rally.reason = "ball landed outside the court"
-            rally.confidence = round(
-                min(last_bounce.confidence, last_hit.confidence), 3
-            )
-            return rally
-
-    # 3. The ball never crossed to the other side after the final hit: it went
-    #    into the net.
-    if last_hit is not None:
-        after = [e for e in events if e.frame > last_hit.frame]
-        hit_side = last_hit.side
-        if after and all(e.side == hit_side for e in after):
-            loser = last_hit.by_player or _player_for_side(hit_side)
-            rally.winner = _other(loser)  # type: ignore[arg-type]
-            rally.reason = "ball did not cross the net"
-            rally.confidence = round(last_hit.confidence * 0.8, 3)
-            return rally
-
-    rally.reason = "rally ending could not be determined"
-    rally.confidence = 0.0
+    :func:`segment` already attributes as it goes; this exists so a rally built
+    by hand - in a test, or from edited events - can be judged on its own.
+    """
+    outcome = _terminal_outcome(rally.events)
+    if outcome is None:
+        rally.winner = None
+        rally.confidence = 0.0
+        rally.reason = rally.reason or "rally ending could not be determined"
+    else:
+        rally.winner, rally.reason, rally.confidence = outcome
     return rally
 
 
@@ -164,11 +225,11 @@ def score_match(
     """Run the full chain: events -> rallies -> attributed points -> score.
 
     Undecided rallies are skipped rather than assigned to a player at random.
-    They are still returned, so the report can show how many points the system
-    could not call - which is the honest denominator for any accuracy claim.
+    They are still returned, so the report can show how many points could not
+    be called - the honest denominator for any accuracy claim.
     """
     match = match or Match()
-    rallies = [attribute(r) for r in segment(events, fps=fps)]
+    rallies = segment(events, fps=fps)
 
     for rally in rallies:
         if rally.winner is None or match.is_over:
@@ -201,6 +262,7 @@ def summarise(rallies: list[Rally], fps: float = 30.0) -> dict:
             if rallies
             else 0.0
         ),
+        "longest_rally_shots": max((r.shot_count for r in rallies), default=0),
         "mean_rally_seconds": (
             round(float(np.mean([r.duration_frames for r in rallies])) / fps, 1)
             if rallies
