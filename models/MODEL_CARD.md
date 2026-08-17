@@ -111,8 +111,8 @@ framing. It has not been evaluated on true overhead or drone angles.
 
 This model is one of three that
 [tennis-auto-scoring](https://github.com/GuptaOum/tennis-auto-scoring) runs per
-frame. The other two are **not mine and are not republished here** — they are
-listed so the system is reproducible and so credit lands where it belongs:
+frame. **Neither of the other two is my training**, and they are listed here so
+the system is reproducible and so credit lands where it belongs:
 
 | stage | model | source |
 |---|---|---|
@@ -165,8 +165,9 @@ Feet, not box centres, are what get projected — the homography maps the court
 *plane*, so a position is only meaningful at ground level. Using the box centre
 places everyone about a metre behind where they stand.
 
-**The court keypoint model is not mirrored here, and cannot be.** It is the
-upstream author's work, and that repository carries no licence file — so there is
+### The court keypoint model
+
+**Not mirrored here, and it cannot be.** It is the upstream author's work, and that repository carries no licence file — so there is
 no grant to redistribute its weights, whatever their quality. The project
 downloads it from the source instead. It is worth naming precisely because it is
 good: a 0.29 px median reprojection error on courts it has never seen, which is
