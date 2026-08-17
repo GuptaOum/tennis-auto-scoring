@@ -22,6 +22,7 @@ import numpy as np
 from tennis import analysis as analysis_module
 from tennis import placement as placement_module
 from tennis import rally as rally_module
+from tennis import serve as serve_module
 from tennis import video
 from tennis.bounce import EventType, detect_events
 from tennis.court import COURT_LINES, calibrate
@@ -238,8 +239,20 @@ def run(args: argparse.Namespace) -> dict:
     # a score: trajectory -> bounces and hits -> rallies -> points.
     trajectory = from_detections(ball_track)
     events = detect_events(trajectory, player_boxes=player_boxes, fps=info.fps)
-    match, rallies = rally_module.score_match(events, fps=info.fps)
+    # Serves must be judged before scoring: a first-serve fault ends no point,
+    # and without that the point is awarded to the wrong player.
+    provisional = rally_module.segment(events, fps=info.fps)
+    serves, faults, doubles = serve_module.analyse_serves(
+        provisional, player_boxes_court
+    )
+    match, rallies = rally_module.score_match(
+        events,
+        fps=info.fps,
+        fault_indices=set(faults),
+        double_faults=dict(doubles),
+    )
     rally_summary = rally_module.summarise(rallies, fps=info.fps)
+    serve_summary = serve_module.summarise(serves, doubles)
     analysis = analysis_module.summarise(player_track, ball_track, info.fps)
     placement = placement_module.summarise(rallies, player_boxes_court)
     report = {
@@ -283,6 +296,7 @@ def run(args: argparse.Namespace) -> dict:
             "hits": sum(1 for e in events if e.type is EventType.HIT),
         },
         "rallies": rally_summary,
+        "serves": serve_summary,
         "analysis": analysis,
         "placement": placement,
         "score": match.summary(),
@@ -366,6 +380,20 @@ def main(argv: list[str] | None = None) -> int:
                 + (f"  |  {', '.join(f'{k} {v}' for k, v in directions.items())}"
                    if directions else "")
             )
+
+    serve_stats = report["serves"]
+    if serve_stats["serves_detected"]:
+        print("\n--- serves ---")
+        first_pct = serve_stats["first_serve_percentage"]
+        print(
+            f"{serve_stats['serves_detected']} detected  |  "
+            f"{serve_stats['in']} in, {serve_stats['faults']} faults, "
+            f"{serve_stats['double_faults']} double faults"
+            + (f"  |  first serve {first_pct:.0%}" if first_pct is not None else "")
+        )
+        if serve_stats["boxes"]:
+            print("  placement: " + ", ".join(
+                f"{box} {count}" for box, count in serve_stats["boxes"].items()))
 
     print("\n--- scoring ---")
     print(

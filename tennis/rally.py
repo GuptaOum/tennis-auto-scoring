@@ -220,20 +220,46 @@ def attribute(rally: Rally) -> Rally:
 
 
 def score_match(
-    events: list[BallEvent], fps: float = 30.0, match: Match | None = None
+    events: list[BallEvent],
+    fps: float = 30.0,
+    match: Match | None = None,
+    fault_indices: set[int] | None = None,
+    double_faults: dict[int, Player] | None = None,
 ) -> tuple[Match, list[Rally]]:
     """Run the full chain: events -> rallies -> attributed points -> score.
 
-    Undecided rallies are skipped rather than assigned to a player at random.
-    They are still returned, so the report can show how many points could not
-    be called - the honest denominator for any accuracy claim.
+    ``fault_indices`` are rallies that were a first-serve fault. They end no
+    point and must be skipped: without that, a fault looks exactly like a lost
+    rally and the point goes to the wrong player.
+
+    ``double_faults`` maps a rally index to the receiver, who takes the point
+    regardless of what the rally's own events suggest.
+
+    Undecided rallies are skipped rather than assigned at random. They are
+    still returned, so the report can show how many points could not be
+    called - the honest denominator for any accuracy claim.
     """
     match = match or Match()
     rallies = segment(events, fps=fps)
+    fault_indices = fault_indices or set()
+    double_faults = double_faults or {}
 
-    for rally in rallies:
-        if rally.winner is None or match.is_over:
+    for index, rally in enumerate(rallies):
+        if match.is_over:
+            break
+
+        if index in double_faults:
+            rally.winner = double_faults[index]
+            rally.reason = "double fault"
+            rally.confidence = max(rally.confidence, 0.5)
+        elif index in fault_indices:
+            # A first-serve fault. No point is decided here.
+            rally.winner = None
+            rally.reason = "first-serve fault (no point)"
             continue
+        elif rally.winner is None:
+            continue
+
         match.award_point(
             rally.winner,
             reason=rally.reason,
