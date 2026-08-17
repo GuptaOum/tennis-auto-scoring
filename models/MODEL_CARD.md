@@ -120,8 +120,15 @@ listed so the system is reproducible and so credit lands where it belongs:
 | player detection | `yolov8x.pt`, stock COCO weights | [Ultralytics](https://github.com/ultralytics/ultralytics), AGPL-3.0 |
 | court keypoints | ResNet-50 regressing 14 landmarks | [abdullahtarek/tennis_analysis](https://github.com/abdullahtarek/tennis_analysis) |
 
-Both are downloaded from their own sources by the project, not mirrored here.
-The court keypoint model in particular is the upstream author's work: it reaches
+`third_party/yolov8x.pt` in this repo, if present, is an **unmodified mirror** of
+Ultralytics' stock COCO checkpoint, kept here only so a deployment can fetch
+every weight the pipeline needs from one place. It is not my training and not
+tennis-specific — it detects the 80 COCO classes, of which this project uses
+`person`. Redistributed under AGPL-3.0 per Ultralytics' licence.
+The court keypoint model is **not** mirrored here and cannot be: it is the
+upstream author's work and that repository carries no licence file, so nothing
+grants the right to redistribute its weights. The project downloads it from the
+source. It reaches
 a 0.29 px median reprojection error on unseen courts, which is why the project
 deliberately does **not** retrain it. The upstream repo carries no license file,
 so its weights are not redistributed.

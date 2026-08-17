@@ -3,10 +3,21 @@
     hf auth login                      # once, with a WRITE token
     python training/upload_to_hf.py    # add --private to keep it unlisted
 
-Only ``models/ball_finetuned.pt`` is uploaded. The other two files in
-``models/`` are the upstream project's weights, not ours, and republishing
-someone else's trained artefacts under our account would be wrong regardless of
-whether the licence permits it.
+By default only ``models/ball_finetuned.pt`` is uploaded - the one model here
+that was actually trained by us.
+
+``--with-player-model`` additionally mirrors ``yolov8x.pt`` under
+``third_party/``. That is Ultralytics' unmodified stock COCO checkpoint, which
+AGPL-3.0 permits redistributing; it is mirrored only so a deployment can pull
+every weight the pipeline needs from one place, and the card says plainly whose
+training it is.
+
+``models/keypoints_model.pth`` is deliberately **not** uploadable from here. It
+is the upstream project's court-keypoint ResNet, and that repository carries no
+licence file - nothing grants the right to redistribute its weights. Ask the
+upstream author to add a licence rather than working around its absence.
+``models/yolo5_last.pt`` is likewise upstream's, and is no longer used since the
+fine-tune replaced it.
 
 Authentication is deliberately left to ``hf auth login`` rather than accepting a
 token argument: a token passed on the command line lands in shell history.
@@ -20,6 +31,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WEIGHTS = REPO_ROOT / "models" / "ball_finetuned.pt"
+PLAYER_WEIGHTS = REPO_ROOT / "yolov8x.pt"
 CARD = REPO_ROOT / "models" / "MODEL_CARD.md"
 DEFAULT_NAME = "tennis-ball-detector-yolov8m"
 
@@ -33,6 +45,12 @@ def main(argv: list[str] | None = None) -> int:
         "--owner", default=None, help="account or org (default: the logged-in user)"
     )
     parser.add_argument("--private", action="store_true", help="create it unlisted")
+    parser.add_argument(
+        "--with-player-model",
+        action="store_true",
+        help="also mirror Ultralytics' stock yolov8x.pt under third_party/ "
+             "(131 MB), so a deployment can fetch every weight from one place",
+    )
     args = parser.parse_args(argv)
 
     from huggingface_hub import HfApi
@@ -66,6 +84,20 @@ def main(argv: list[str] | None = None) -> int:
             repo_id=repo_id,
             commit_message="fine-tuned tennis ball detector, YOLOv8m @ 960px",
         )
+        if args.with_player_model:
+            if not PLAYER_WEIGHTS.exists():
+                print(f"missing {PLAYER_WEIGHTS}; skipping the player model",
+                      file=sys.stderr)
+            else:
+                print(f"uploading {PLAYER_WEIGHTS.name} (131 MB, unmodified "
+                      f"Ultralytics weights)")
+                api.upload_file(
+                    path_or_fileobj=str(PLAYER_WEIGHTS),
+                    path_in_repo="third_party/yolov8x.pt",
+                    repo_id=repo_id,
+                    commit_message="mirror Ultralytics yolov8x.pt (stock COCO "
+                                   "weights, AGPL-3.0) for deployment",
+                )
         if CARD.exists():
             api.upload_file(
                 path_or_fileobj=str(CARD),
