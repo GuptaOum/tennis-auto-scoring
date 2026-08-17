@@ -1,0 +1,5 @@
+# Web UI only. The analysis pipeline's own dependencies are in the top-level
+# requirements.txt and are assumed to be installed already.
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
