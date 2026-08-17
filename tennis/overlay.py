@@ -50,6 +50,8 @@ INK = (245, 245, 245)
 DIM = (170, 170, 170)
 PANEL = (24, 26, 30)
 LINE = (110, 120, 128)
+COURT_FILL = (58, 48, 40)      # opaque slab behind the minimap plan
+COURT_MARK = (150, 160, 168)   # its lines
 GOOD = (110, 230, 140)
 BAD = (90, 90, 240)
 WARN = (70, 190, 250)
@@ -390,10 +392,17 @@ class Renderer:
                    P1 if state.server == 1 else P2, -1, cv2.LINE_AA)
 
     def _minimap_geometry(self) -> tuple[int, int, float]:
+        """Origin and scale, kept fully inside the frame.
+
+        The caption sits below the plan and the panel border outside it, so the
+        margin has to account for both - at 1080p an earlier version clipped
+        "COURT VIEW" off the right edge.
+        """
         scale = self.minimap_scale
-        pad = 14
-        origin_x = self.width - int(DOUBLES_WIDTH * scale) - pad - 14
-        return origin_x, 18 + 14, scale
+        margin = 26
+        width = int(DOUBLES_WIDTH * scale)
+        origin_x = max(self.width - width - margin, 0)
+        return origin_x, 32, scale
 
     def _draw_minimap(self, canvas: np.ndarray, index: int,
                       state: FrameState) -> None:
@@ -405,23 +414,27 @@ class Renderer:
         """
         ox, oy, scale = self._minimap_geometry()
         w, h = int(DOUBLES_WIDTH * scale), int(COURT_LENGTH * scale)
-        _panel(canvas, ox - 14, oy - 14, w + 28, h + 46)
+        _panel(canvas, ox - 12, oy - 12, w + 24, h + 44, 0.9)
 
         def to_px(x: float, y: float) -> tuple[int, int]:
             return int(ox + x * scale), int(oy + y * scale)
 
+        # The playing surface is filled opaque. A translucent plan over a
+        # bright crowd is unreadable - this is a diagram, not a tint.
         cv2.rectangle(canvas, to_px(0, 0), to_px(DOUBLES_WIDTH, COURT_LENGTH),
-                      LINE, 1, cv2.LINE_AA)
+                      COURT_FILL, -1)
+        cv2.rectangle(canvas, to_px(0, 0), to_px(DOUBLES_WIDTH, COURT_LENGTH),
+                      INK, 1, cv2.LINE_AA)
         for x in (ALLEY, DOUBLES_WIDTH - ALLEY):
-            cv2.line(canvas, to_px(x, 0), to_px(x, COURT_LENGTH), LINE, 1,
+            cv2.line(canvas, to_px(x, 0), to_px(x, COURT_LENGTH), COURT_MARK, 1,
                      cv2.LINE_AA)
         for y in (NET_Y - SERVICE_LINE_FROM_NET, NET_Y + SERVICE_LINE_FROM_NET):
             cv2.line(canvas, to_px(ALLEY, y), to_px(DOUBLES_WIDTH - ALLEY, y),
-                     LINE, 1, cv2.LINE_AA)
+                     COURT_MARK, 1, cv2.LINE_AA)
         cv2.line(canvas,
                  to_px(DOUBLES_WIDTH / 2, NET_Y - SERVICE_LINE_FROM_NET),
                  to_px(DOUBLES_WIDTH / 2, NET_Y + SERVICE_LINE_FROM_NET),
-                 LINE, 1, cv2.LINE_AA)
+                 COURT_MARK, 1, cv2.LINE_AA)
         cv2.line(canvas, to_px(-0.4, NET_Y), to_px(DOUBLES_WIDTH + 0.4, NET_Y),
                  INK, 2, cv2.LINE_AA)
 
@@ -448,7 +461,7 @@ class Renderer:
             cv2.circle(canvas, to_px(ball["court"][0], ball["court"][1]), 4,
                        BALL, 1, cv2.LINE_AA)
 
-        _text(canvas, "COURT VIEW  (metres)", (ox - 6, oy + h + 26), 0.4, DIM, 1)
+        _text(canvas, "COURT VIEW  (metres)", (ox, oy + h + 24), 0.4, DIM, 1)
 
     def _draw_player_strip(self, canvas: np.ndarray, index: int) -> None:
         rows = sorted(self.player_court)
