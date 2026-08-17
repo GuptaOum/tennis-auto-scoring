@@ -120,18 +120,19 @@ listed so the system is reproducible and so credit lands where it belongs:
 | player detection | `yolov8x.pt`, stock COCO weights | [Ultralytics](https://github.com/ultralytics/ultralytics), AGPL-3.0 |
 | court keypoints | ResNet-50 regressing 14 landmarks | [abdullahtarek/tennis_analysis](https://github.com/abdullahtarek/tennis_analysis) |
 
-`third_party/yolov8x.pt` in this repo, if present, is an **unmodified mirror** of
-Ultralytics' stock COCO checkpoint, kept here only so a deployment can fetch
-every weight the pipeline needs from one place. It is not my training and not
-tennis-specific — it detects the 80 COCO classes, of which this project uses
-`person`. Redistributed under AGPL-3.0 per Ultralytics' licence.
-The court keypoint model is **not** mirrored here and cannot be: it is the
-upstream author's work and that repository carries no licence file, so nothing
-grants the right to redistribute its weights. The project downloads it from the
-source. It reaches
-a 0.29 px median reprojection error on unseen courts, which is why the project
-deliberately does **not** retrain it. The upstream repo carries no license file,
-so its weights are not redistributed.
+**The player detector** may appear here as `third_party/yolov8x.pt`. If it does,
+it is an unmodified mirror of Ultralytics' stock COCO checkpoint, kept only so a
+deployment can fetch every weight the pipeline needs from one place. It is not
+my training and not tennis-specific: it detects the 80 COCO classes, of which
+this project uses `person`. Redistributed under AGPL-3.0 per Ultralytics'
+licence.
+
+**The court keypoint model is not mirrored here, and cannot be.** It is the
+upstream author's work, and that repository carries no licence file — so there is
+no grant to redistribute its weights, whatever their quality. The project
+downloads it from the source instead. It is worth naming precisely because it is
+good: a 0.29 px median reprojection error on courts it has never seen, which is
+why this project deliberately does *not* retrain it.
 
 Everything on top of those detections — homography calibration, ground-contact
 detection, rally segmentation, serve and fault logic, tennis scoring, shot
