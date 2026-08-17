@@ -120,12 +120,50 @@ listed so the system is reproducible and so credit lands where it belongs:
 | player detection | `yolov8x.pt`, stock COCO weights | [Ultralytics](https://github.com/ultralytics/ultralytics), AGPL-3.0 |
 | court keypoints | ResNet-50 regressing 14 landmarks | [abdullahtarek/tennis_analysis](https://github.com/abdullahtarek/tennis_analysis) |
 
-**The player detector** may appear here as `third_party/yolov8x.pt`. If it does,
-it is an unmodified mirror of Ultralytics' stock COCO checkpoint, kept only so a
-deployment can fetch every weight the pipeline needs from one place. It is not
-my training and not tennis-specific: it detects the 80 COCO classes, of which
-this project uses `person`. Redistributed under AGPL-3.0 per Ultralytics'
-licence.
+### The player detector
+
+`third_party/yolov8x.pt`, if present in this repo, is an **unmodified mirror** of
+Ultralytics' stock COCO checkpoint, kept only so a deployment can fetch every
+weight the pipeline needs from one place. It is not my training and not
+tennis-specific: it detects the 80 COCO classes, of which this project uses
+`person` (class 0), tracked across frames for stable identities. Redistributed
+under AGPL-3.0 per Ultralytics' licence.
+
+#### Using the person detector for tennis
+
+Worth spelling out, because the naive version is wrong in a way that quietly
+corrupts every downstream number: **a person detector does not give you players.**
+
+On a Vienna ATP clip, stock `yolov8x.pt` tracked **six** people — the two
+players, plus ball kids at the net posts, line judges along the tramlines, and
+the chair umpire. Projected to court coordinates, the extras sat at positions
+like `(14.6, 5.4)` and `(-3.4, -8.3)` metres: outside a court that is 10.97 m
+wide and 23.77 m long.
+
+Left unfiltered that is not untidy, it is incorrect. Every one of those tracks
+feeds distance covered, average speed, net approaches and the coverage heatmaps,
+so a ball kid jogging to a post is reported as a player covering ground. It also
+breaks shot attribution, since a ball passing near a line judge looks like a
+shot struck by one.
+
+The fix uses two facts about singles tennis rather than a tuned threshold:
+
+1. **Players are on the court; everyone else is beside or behind it.** Once feet
+   are projected to metres through the court homography, distance from the court
+   separates them cleanly. The bounds are deliberately generous — 3 m wide, 5 m
+   behind — because a wide serve is returned from outside the tramline and deep
+   balls are retrieved well behind the baseline.
+2. **There is exactly one player per side of the net.** This settles the only
+   hard case, a ball kid standing behind a real player: they compete against
+   that player alone, and lose on distance from the court.
+
+With no court calibration there are no metres to measure, so it falls back to the
+two largest boxes and nothing downstream claims a distance. Implementation:
+[`tennis/players.py`](https://github.com/GuptaOum/tennis-auto-scoring/blob/main/tennis/players.py).
+
+Feet, not box centres, are what get projected — the homography maps the court
+*plane*, so a position is only meaningful at ground level. Using the box centre
+places everyone about a metre behind where they stand.
 
 **The court keypoint model is not mirrored here, and cannot be.** It is the
 upstream author's work, and that repository carries no licence file — so there is
