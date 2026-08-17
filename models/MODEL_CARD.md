@@ -19,6 +19,25 @@ turns a match video into an automatic score.
 
 **One class:** `tennis ball`. 25.9M parameters, 50 MB.
 
+## What is in this repo
+
+The pipeline runs **three** models per frame. Two of them are here:
+
+| file | stage | whose | status |
+|---|---|---|---|
+| `ball_finetuned.pt` | ball detection | **fine-tuned by me** | here, 50 MB |
+| `third_party/yolov8x.pt` | person detection | Ultralytics, stock COCO | here as an unmodified mirror, 131 MB |
+| *court keypoints* | 14 court landmarks | — | **not yet — see below** |
+
+The third stage, court-keypoint detection, is the one this repo is still missing.
+The project currently uses the upstream author's ResNet-50 for it, which carries
+no licence and so cannot be redistributed. **A replacement trained by me is
+planned**, on the MIT-licensed
+[TennisCourtDetector](https://github.com/yastrebksv/TennisCourtDetector) dataset
+(8,841 images), and will be published as its own repo with its own PCK metrics —
+it is a keypoint regressor rather than a detector and does not belong in this
+one. Details in [The court keypoint model](#the-court-keypoint-model).
+
 ## Why this exists
 
 A tennis ball is roughly 15 pixels across in a 1080p frame. That is close to
@@ -114,17 +133,17 @@ This model is one of three that
 frame. **Neither of the other two is my training**, and they are listed here so
 the system is reproducible and so credit lands where it belongs:
 
-| stage | model | source |
-|---|---|---|
-| ball detection | this repo, YOLOv8m @ 960px | fine-tuned by me |
-| player detection | `yolov8x.pt`, stock COCO weights | [Ultralytics](https://github.com/ultralytics/ultralytics), AGPL-3.0 |
-| court keypoints | ResNet-50 regressing 14 landmarks | [abdullahtarek/tennis_analysis](https://github.com/abdullahtarek/tennis_analysis) |
+| stage | model | source | in this repo |
+|---|---|---|---|
+| ball detection | YOLOv8m @ 960px | fine-tuned by me | yes |
+| person detection | `yolov8x.pt`, stock COCO | [Ultralytics](https://github.com/ultralytics/ultralytics), AGPL-3.0 | yes, mirrored |
+| court keypoints | ResNet-50, 14 landmarks | [abdullahtarek/tennis_analysis](https://github.com/abdullahtarek/tennis_analysis) | no — replacement planned |
 
 ### The player detector
 
-`third_party/yolov8x.pt`, if present in this repo, is an **unmodified mirror** of
-Ultralytics' stock COCO checkpoint, kept only so a deployment can fetch every
-weight the pipeline needs from one place. It is not my training and not
+`third_party/yolov8x.pt` is an **unmodified mirror** of Ultralytics' stock COCO
+checkpoint, kept here only so a deployment can fetch every weight the pipeline
+needs from one place. It is not my training and not
 tennis-specific: it detects the 80 COCO classes, of which this project uses
 `person` (class 0), tracked across frames for stable identities. Redistributed
 under AGPL-3.0 per Ultralytics' licence.
