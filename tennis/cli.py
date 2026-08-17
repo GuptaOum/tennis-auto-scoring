@@ -20,6 +20,7 @@ import cv2
 import numpy as np
 
 from tennis import analysis as analysis_module
+from tennis import placement as placement_module
 from tennis import rally as rally_module
 from tennis import video
 from tennis.bounce import EventType, detect_events
@@ -148,6 +149,7 @@ def run(args: argparse.Namespace) -> dict:
     ball_track: list[dict] = []
     player_track: list[dict] = []
     player_boxes: dict[int, dict[int, tuple]] = {}
+    player_boxes_court: dict[int, dict[int, np.ndarray]] = {}
     processed = 0
     started = time.time()
 
@@ -210,6 +212,11 @@ def run(args: argparse.Namespace) -> dict:
                         player_boxes.setdefault(player.track_id, {})[index] = (
                             player.bbox
                         )
+                        # Court-space feet, for shot origin. Valid because a
+                        # player stands on the plane the homography maps.
+                        player_boxes_court.setdefault(player.track_id, {})[
+                            index
+                        ] = court_pt
 
             if writer is not None:
                 writer.write(
@@ -234,6 +241,7 @@ def run(args: argparse.Namespace) -> dict:
     match, rallies = rally_module.score_match(events, fps=info.fps)
     rally_summary = rally_module.summarise(rallies, fps=info.fps)
     analysis = analysis_module.summarise(player_track, ball_track, info.fps)
+    placement = placement_module.summarise(rallies, player_boxes_court)
     report = {
         "input": {
             "path": str(info.path),
@@ -276,6 +284,7 @@ def run(args: argparse.Namespace) -> dict:
         },
         "rallies": rally_summary,
         "analysis": analysis,
+        "placement": placement,
         "score": match.summary(),
     }
 
@@ -332,6 +341,32 @@ def main(argv: list[str] | None = None) -> int:
         for line in player["coverage"]:
             print(f"    {line}")
 
+    placement = report["placement"]
+    if placement["in_bounds"]:
+        print("\n--- shot placement ---")
+        overall = placement["overall"]
+        print(
+            f"{placement['in_bounds']} landings in, {placement['out_of_bounds']} out"
+            f"  |  mean depth {overall['mean_depth_m']} m from net"
+            f"  |  {overall['deep_share']:.0%} deep"
+        )
+        for label, grid in placement["grids"].items():
+            if sum(map(sum, grid)):
+                print(f"  {label} half (net at top):")
+                for line in placement_module.render_grid(grid):
+                    print(f"    {line}")
+        for track_id, stats in placement["by_player"].items():
+            if not stats.get("landings"):
+                continue
+            bands = stats["depth_bands"]
+            directions = stats.get("directions", {})
+            print(
+                f"  player {track_id}: {stats['landings']} shots  "
+                f"deep {bands['deep']} / mid {bands['mid']} / short {bands['short']}"
+                + (f"  |  {', '.join(f'{k} {v}' for k, v in directions.items())}"
+                   if directions else "")
+            )
+
     print("\n--- scoring ---")
     print(
         f"rallies            : {rallies['rallies_found']} found, "
@@ -345,8 +380,17 @@ def main(argv: list[str] | None = None) -> int:
                 f"player {point['winner']} ({point['reason']}, "
                 f"confidence {point['confidence']})"
             )
+    score = report["score"]
     if rallies["points_decided"]:
-        print(f"score              : {report['score']['scoreline']}")
+        print()
+        print("   +------------------------------------------+")
+        print(f"   |  SCORE   {score['scoreline']:<32}|")
+        print(f"   |  points  {score['points_played']:<3} played"
+              f"{'':<24}|")
+        if score["low_confidence_points"]:
+            print(f"   |  {score['low_confidence_points']} point(s) flagged low confidence"
+                  f"{'':<9}|")
+        print("   +------------------------------------------+")
     else:
         print("score              : no completed point found in this clip")
     print(f"\nreport             : {Path(args.out) / 'report.json'}")
