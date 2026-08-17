@@ -135,7 +135,9 @@ class Renderer:
         self.rallies = rallies
         self.match = match
 
-        self.minimap_scale = max(min(width, height) * 0.00019, 0.55) * 26
+        # Sized so the court plan is a fixed share of frame height rather than
+        # a fixed pixel count: legible on 720p and 4K alike.
+        self.minimap_scale = max(height * 0.38 / COURT_LENGTH, 8.0)
         self.states = self._build_states()
         self.last_state_frame = max(self.states, default=0)
         self.distance = self._cumulative_distance()

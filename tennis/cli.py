@@ -23,6 +23,7 @@ import numpy as np
 
 from tennis import analysis as analysis_module
 from tennis import placement as placement_module
+from tennis import players as players_module
 from tennis import overlay
 from tennis import rally as rally_module
 from tennis import report as report_module
@@ -139,7 +140,12 @@ def run(args: argparse.Namespace) -> dict:
             except ValueError as exc:
                 calibrations.append({"frame": index, "error": str(exc)})
 
-        detected_players = players_model.detect(frame)
+        # The detector finds people; only two of them are playing. Ball kids,
+        # line judges and the umpire would otherwise be reported as players
+        # covering ground. See tennis/players.py.
+        detected_players = players_module.select(
+            players_model.detect(frame), calib
+        )
         ball = ball_model.detect(frame)
 
         if ball is not None and calib is not None:
