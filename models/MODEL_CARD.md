@@ -107,6 +107,29 @@ framing. It has not been evaluated on true overhead or drone angles.
   metrics above as evidence it works on this kind of footage, not as a general
   benchmark claim.
 
+## The rest of the pipeline
+
+This model is one of three that
+[tennis-auto-scoring](https://github.com/GuptaOum/tennis-auto-scoring) runs per
+frame. The other two are **not mine and are not republished here** — they are
+listed so the system is reproducible and so credit lands where it belongs:
+
+| stage | model | source |
+|---|---|---|
+| ball detection | this repo, YOLOv8m @ 960px | fine-tuned by me |
+| player detection | `yolov8x.pt`, stock COCO weights | [Ultralytics](https://github.com/ultralytics/ultralytics), AGPL-3.0 |
+| court keypoints | ResNet-50 regressing 14 landmarks | [abdullahtarek/tennis_analysis](https://github.com/abdullahtarek/tennis_analysis) |
+
+Both are downloaded from their own sources by the project, not mirrored here.
+The court keypoint model in particular is the upstream author's work: it reaches
+a 0.29 px median reprojection error on unseen courts, which is why the project
+deliberately does **not** retrain it. The upstream repo carries no license file,
+so its weights are not redistributed.
+
+Everything on top of those detections — homography calibration, ground-contact
+detection, rally segmentation, serve and fault logic, tennis scoring, shot
+placement, the HTML report and the annotated video — is mine.
+
 ## Training
 
 - Base weights: `yolov8m.pt`
