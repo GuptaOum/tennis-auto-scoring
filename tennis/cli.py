@@ -63,7 +63,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "halves the detection rate on 1080p footage)",
     )
     parser.add_argument("--player-model", default="yolov8x.pt")
-    parser.add_argument("--ball-model", default="models/yolo5_last.pt")
+    parser.add_argument("--ball-model", default="models/ball_finetuned.pt")
     parser.add_argument("--court-model", default="models/keypoints_model.pth")
     parser.add_argument(
         "--no-video", action="store_true", help="write the JSON report only"

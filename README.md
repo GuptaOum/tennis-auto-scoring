@@ -107,28 +107,45 @@ Two consequences run through the code:
 
 ## Results
 
-Measured, on the 7-second sample clip (Tesla T4):
+End to end on a 15-second amateur singles clip the system had never seen,
+downloaded from YouTube. Tesla T4.
 
-| Metric | Value |
-|---|---|
-| Throughput | **9.4 fps** (0.13 fps on CPU — 65× slower) |
-| Court calibration reliable | **8/8 attempts** |
-| Median reprojection error | **0.86 px** (~1 cm on court) |
-| Ball detection rate | **43.9%** of frames |
-| Tests | **57 passing** |
+| Metric | Baseline repo | This repo |
+|---|---|---|
+| Ball detection rate | 43.9% | **98.2%** of frames |
+| Mean ball confidence | 0.366 | **0.688** |
+| Court calibration | frame 0 only | **14/16 reliable**, median **0.29 px** (~1 cm) |
+| Events found | conflated into one "shot" type | **18 bounces, 17 hits** |
+| Points scored | no scoring logic exists | **1 rally, confidence 0.726** |
+| Throughput | — | **9.3 fps** (0.13 fps CPU) |
+| Tests | 0 | **68 passing** |
 
-Not yet measured — these need a clip containing completed points:
+### Ball detector, fine-tuned
 
-| Metric | Value |
-|---|---|
-| Bounce detection F1 | — |
-| Point attribution accuracy | — |
-| Games scored correctly | — |
+Measured on the same held-out val set, same `imgsz=960`:
 
-**Known bottleneck: ball detection at 43.9%.** Bounces are decided by the
-frames immediately around ground contact, which is exactly where the ball is
-fastest and most motion-blurred. Every missed detection there is a missed
-event. Fine-tuning the ball detector is the highest-value next step.
+| Metric | Baseline `yolo5_last.pt` | Fine-tuned |
+|---|---|---|
+| mAP50 | 0.5878 | **0.8996** |
+| mAP50-95 | 0.2212 | **0.4581** |
+| Precision | 0.6330 | **0.9252** |
+| Recall | 0.5806 | **0.8713** |
+| Model size | 165 MB (86M params) | **50 MB** (26M params) |
+
+mAP50-95 more than doubling is the meaningful part: boxes are tighter, so the
+ball's *position* is more accurate, which is what bounce localisation consumes.
+A 26M-param model beat an 86M-param one on identical data — mostly by training
+at the resolution it is actually served at.
+
+### The change that cost nothing
+
+Before any training, raising ball-detector inference from YOLO's default
+`imgsz=640` to `960` took detection from **47.0% to 95.6%**. A tennis ball is
+~15 px in a 1080p frame; at 640 the letterboxed frame leaves ~5 px. The model
+was never the problem — the way it was being called was.
+
+Still unmeasured, because it needs footage with several completed points:
+point-attribution accuracy against hand-labelled rallies.
 
 ## Video requirements
 
