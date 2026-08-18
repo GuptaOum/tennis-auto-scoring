@@ -30,7 +30,6 @@ import numpy as np
 from tennis.bounce import BallEvent, EventType
 from tennis.court import (
     COURT_LENGTH,
-    COURT_LINES,
     COURT_MODEL,
     DOUBLES_WIDTH,
     NET_Y,
@@ -49,10 +48,15 @@ BALL = (60, 240, 250)
 INK = (245, 245, 245)
 DIM = (170, 170, 170)
 PANEL = (24, 26, 30)
-LINE = (110, 120, 128)
 COURT_FILL = (58, 48, 40)      # opaque slab behind the minimap plan
 COURT_MARK = (150, 160, 168)   # its lines
-KEYPOINT = (60, 60, 235)       # the 14 court landmarks, in red
+KEYPOINT = (60, 60, 235)       # the court corner dots, in red
+
+# Which COURT_MODEL points to mark. 0-3 are the four doubles corners, i.e. the
+# outer boundary of the court. Widen to (0, 1, 2, 3, 4, 5, 6, 7) to add the
+# singles corners; the full 14-point set is COURT_MODEL itself.
+# A list, not a tuple: numpy reads a tuple as a multi-dimensional index.
+COURT_CORNERS = [0, 1, 2, 3]
 GOOD = (110, 230, 140)
 BAD = (90, 90, 240)
 WARN = (70, 190, 250)
@@ -299,32 +303,34 @@ class Renderer:
         return canvas
 
     def _draw_court(self, canvas: np.ndarray) -> None:
-        """Court lines projected from the homography, not the raw keypoints.
+        """The court's four corners, as dots. No lines.
 
-        Drawing the fitted model rather than the regressed points means the
-        lines are geometrically consistent - and visibly wrong when the
-        calibration is wrong, which is the honest failure mode.
+        The real court already has lines painted on it, and drawing ours on top
+        obscured the footage without adding information. A dot that sits away
+        from the painted corner underneath it still shows a drifted calibration
+        just as plainly - the honest failure mode is preserved, the clutter is
+        not.
+
+        Corners only, projected from the *fitted* homography rather than the raw
+        regressed keypoints, so what is drawn is the geometry the analysis
+        actually used.
         """
         if self.calibration is None:
             return
         try:
-            image_points = self.calibration.to_image(COURT_MODEL)
+            image_points = self.calibration.to_image(COURT_MODEL[COURT_CORNERS])
         except Exception:  # noqa: BLE001 - a bad matrix must not stop the video
             return
-        for a, b in COURT_LINES:
-            pa, pb = image_points[a].astype(int), image_points[b].astype(int)
-            cv2.line(canvas, tuple(pa), tuple(pb), LINE, 1, cv2.LINE_AA)
 
-        # The 14 court landmarks the keypoint model exists to find: doubles and
-        # singles corners, service-line intersections and centre marks. Drawn
-        # from the *fitted* homography rather than the raw regressed points, so
-        # a dot sitting off its line is visible evidence that the calibration
-        # has drifted - the honest failure mode, and the reason the median
-        # reprojection error is 0.29 px when it is working.
+        height, width = canvas.shape[:2]
         for point in image_points:
-            centre = (int(point[0]), int(point[1]))
-            cv2.circle(canvas, centre, 4, (0, 0, 0), -1, cv2.LINE_AA)
-            cv2.circle(canvas, centre, 3, KEYPOINT, -1, cv2.LINE_AA)
+            x, y = int(point[0]), int(point[1])
+            # A wild homography can throw a corner far off-canvas; cv2 handles
+            # that, but skipping keeps the marker from smearing at the edge.
+            if not (-50 <= x <= width + 50 and -50 <= y <= height + 50):
+                continue
+            cv2.circle(canvas, (x, y), 6, (0, 0, 0), -1, cv2.LINE_AA)
+            cv2.circle(canvas, (x, y), 4, KEYPOINT, -1, cv2.LINE_AA)
 
     def _draw_players(self, canvas: np.ndarray, index: int) -> None:
         for track_id, boxes in self.player_boxes.items():

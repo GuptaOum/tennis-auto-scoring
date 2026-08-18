@@ -48,6 +48,13 @@ LOW_CONFIDENCE = 0.6
 # stray detections during a changeover should not become a point.
 MIN_EVENTS = 2
 
+# Longest gap between two bounces that can still be one ball bouncing twice.
+# A ball that is not returned bounces again quickly - well inside a second on a
+# fast surface, and not much more on a slow one. Beyond this the two bounces
+# belong to different shots and the hit between them was simply not detected,
+# so calling it a double bounce would award a point that was never won.
+MAX_DOUBLE_BOUNCE_SECONDS = 1.5
+
 
 @dataclass
 class Rally:
@@ -90,7 +97,9 @@ def _other(player: Player) -> Player:
     return 2 if player == 1 else 1
 
 
-def _terminal_outcome(events: list[BallEvent]) -> tuple[Player, str, float] | None:
+def _terminal_outcome(
+    events: list[BallEvent], fps: float = 30.0
+) -> tuple[Player, str, float] | None:
     """Does this event sequence end with a point? If so, to whom and why.
 
     Checked against the *tail* of the sequence, so a rally closes on the event
@@ -112,12 +121,25 @@ def _terminal_outcome(events: list[BallEvent]) -> tuple[Player, str, float] | No
                 previous_bounce = event
                 break
         if previous_bounce is not None and previous_bounce.side == last.side:
-            loser = _player_for_side(last.side)
-            return (
-                _other(loser),
-                f"double bounce on the {last.side} side",
-                round(min(previous_bounce.confidence, last.confidence), 3),
-            )
+            # "No hit between them" is only evidence of a double bounce if a
+            # hit could not have been *missed* between them, and the clock says
+            # whether it could. A ball that is not returned bounces again
+            # within about a second; two same-side bounces further apart than
+            # that are two different shots with an undetected hit in between.
+            #
+            # Without this the rule fires on every missed hit, and since a
+            # rally closes the moment any ending matches, one missed hit splits
+            # a point in two and awards the first half to the wrong player. On
+            # the Wimbledon clip that turned 3 real points into 6 rallies, all
+            # reasoned as double bounces.
+            interval = (last.frame - previous_bounce.frame) / max(fps, 1e-6)
+            if interval <= MAX_DOUBLE_BOUNCE_SECONDS:
+                loser = _player_for_side(last.side)
+                return (
+                    _other(loser),
+                    f"double bounce on the {last.side} side",
+                    round(min(previous_bounce.confidence, last.confidence), 3),
+                )
 
     # 2. The ball bounced outside the singles court. Whoever hit it last put it
     #    out - so the ball must have been struck before it landed.
@@ -189,27 +211,27 @@ def segment(events: list[BallEvent], fps: float = 30.0) -> list[Rally]:
     for event in ordered:
         # A long silence means play stopped without a readable ending.
         if current and event.frame - current[-1].frame > gap_frames:
-            close(_terminal_outcome(current))
+            close(_terminal_outcome(current, fps))
 
         current.append(event)
 
-        outcome = _terminal_outcome(current)
+        outcome = _terminal_outcome(current, fps)
         if outcome is not None:
             close(outcome)
 
     if current:
-        close(_terminal_outcome(current))
+        close(_terminal_outcome(current, fps))
 
     return rallies
 
 
-def attribute(rally: Rally) -> Rally:
+def attribute(rally: Rally, fps: float = 30.0) -> Rally:
     """Re-derive a rally's outcome from its events. Mutates and returns it.
 
     :func:`segment` already attributes as it goes; this exists so a rally built
     by hand - in a test, or from edited events - can be judged on its own.
     """
-    outcome = _terminal_outcome(rally.events)
+    outcome = _terminal_outcome(rally.events, fps)
     if outcome is None:
         rally.winner = None
         rally.confidence = 0.0

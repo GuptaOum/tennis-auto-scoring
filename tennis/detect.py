@@ -99,19 +99,33 @@ class BallDetector:
         self.device = device
         self.imgsz = imgsz
 
-    def detect(self, frame: np.ndarray) -> Detection | None:
+    def candidates(self, frame: np.ndarray, top_k: int = 5) -> list[Detection]:
+        """Every plausible ball in this frame, best-scoring first.
+
+        Which of these is the ball is not decidable from one frame: a bright
+        line marking often outscores a motion-blurred ball. The choice is made
+        once the whole flight is known, in tennis.balltrack.
+        """
         result = self.model.predict(
             frame, conf=self.conf, imgsz=self.imgsz, device=self.device,
             verbose=False
         )[0]
-        if not len(result.boxes):
-            return None
+        ranked = sorted(
+            result.boxes, key=lambda b: float(b.conf.item()), reverse=True
+        )[:top_k]
+        return [
+            Detection(
+                bbox=tuple(b.xyxy.tolist()[0]), confidence=float(b.conf.item())
+            )
+            for b in ranked
+        ]
+
+    def detect(self, frame: np.ndarray) -> Detection | None:
         # Highest confidence, not last-in-loop. A tennis ball is one object;
-        # extra boxes are line markings and shoes.
-        best = max(result.boxes, key=lambda b: float(b.conf.item()))
-        return Detection(
-            bbox=tuple(best.xyxy.tolist()[0]), confidence=float(best.conf.item())
-        )
+        # extra boxes are line markings and shoes. Kept for callers that want a
+        # single-frame answer; the pipeline uses candidates() instead.
+        found = self.candidates(frame, top_k=1)
+        return found[0] if found else None
 
 
 class CourtDetector:

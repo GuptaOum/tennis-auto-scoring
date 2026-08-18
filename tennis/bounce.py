@@ -79,6 +79,43 @@ class BallEvent:
         )
 
 
+def _learned_contacts(
+    run, bounce_model, min_separation: int
+) -> tuple[list[int], set[int]]:
+    """Candidate contacts, and which of them the model calls ground contacts.
+
+    Worth stating why this exists at all: ``training/calibrate_bounce.py`` swept
+    ``min_ground_prominence`` over its whole useful range against ground truth
+    read off a broadcast scoreboard, and *no value found both points*. A
+    parameter with no correct setting is the wrong model.
+
+    The proposal stage that feeds this is deliberately permissive - it offers
+    every upward corner in the ball's image path, which reaches 99% of real
+    bounces on the TrackNet dataset, against 35% for the geometric rule this
+    replaces. Precision is the classifier's job, not the proposer's.
+
+    Falls back to returning nothing rather than raising: a broken model file
+    must not take a whole run down, and the caller's geometric path is still
+    the default when no model is supplied.
+    """
+    from tennis import bounce_learned
+
+    candidates = bounce_learned.propose_run(run)
+    if not candidates:
+        return [], set()
+    try:
+        accepted = {c.index for c, _ in bounce_model.accept(candidates)}
+    except Exception:
+        return [], set()
+
+    # Every proposal survives to the hit/bounce decision; only the *bounce*
+    # verdict comes from the model. Filtering here instead would delete racket
+    # strikes, because the model is trained to reject them - and a rally that
+    # loses its hits reads as consecutive same-side bounces, which is exactly
+    # the pattern the double-bounce rule scores as a point.
+    return _dedupe(sorted(c.index for c in candidates), min_separation), accepted
+
+
 def _turning_points(
     values: np.ndarray, min_prominence: float, kind: str = "both"
 ) -> list[int]:
@@ -86,9 +123,26 @@ def _turning_points(
 
     ``kind`` selects ``"max"`` (peaks), ``"min"`` (valleys) or ``"both"``.
 
-    ``min_prominence`` is how far the signal must travel away from the turning
-    point, on both sides, before the reversal counts. Without it, detector
-    jitter of a pixel or two registers as dozens of events per second.
+    ``min_prominence`` is how far the signal must fall away from a peak (or
+    rise away from a valley) on *both* sides before the reversal counts.
+
+    Prominence is measured the standard way: walk outwards until the signal
+    exceeds the turning point itself, and take the largest excursion reached
+    along the way. Two details matter and both were once wrong here, which is
+    worth stating because the bug was invisible until the ball detector
+    improved:
+
+    - The excursion is **signed**. A peak has to be followed by a *descent*;
+      measuring ``abs()`` counts a later climb as evidence for the peak, which
+      it plainly is not.
+    - The walk **stops at a higher point**. Left unbounded it scans the whole
+      run, and since projected court y swings tens of metres over a rally,
+      every one-sample wobble eventually finds a metre and a half of deviation
+      somewhere and is promoted to a bounce.
+
+    Together those made the test almost vacuous, and its output scaled with run
+    length rather than with the signal: on a sparse trajectory it passed 7
+    events, on a denser one over the same video it passed 60.
     """
     if len(values) < 3:
         return []
@@ -102,16 +156,18 @@ def _turning_points(
         if not wanted:
             continue
 
-        # Walk outwards until the signal has moved far enough to be convincing.
+        # For a peak, a neighbour is "beyond" once it rises above the peak, and
+        # the excursion of interest is how far the signal sank before then.
+        peak = is_peak if kind != "min" else False
         left = right = 0.0
         for j in range(i - 1, -1, -1):
-            left = max(left, abs(values[j] - here))
-            if left >= min_prominence:
+            if (values[j] > here) if peak else (values[j] < here):
                 break
+            left = max(left, (here - values[j]) if peak else (values[j] - here))
         for j in range(i + 1, len(values)):
-            right = max(right, abs(values[j] - here))
-            if right >= min_prominence:
+            if (values[j] > here) if peak else (values[j] < here):
                 break
+            right = max(right, (here - values[j]) if peak else (values[j] - here))
 
         if min(left, right) >= min_prominence:
             out.append(i)
@@ -132,9 +188,10 @@ def detect_events(
     player_boxes: dict[int, dict[int, tuple[float, float, float, float]]]
     | None = None,
     fps: float = 30.0,
-    min_ground_prominence: float = 1.5,
+    min_ground_prominence: float = 0.6,
     hit_reach: float = 0.8,
     line_margin: float = 0.10,
+    bounce_model=None,
 ) -> list[BallEvent]:
     """Find bounces and hits along a ball trajectory.
 
@@ -145,6 +202,16 @@ def detect_events(
     ``min_ground_prominence`` is how far projected court y must swing, in
     metres, for a descent-then-recovery to count as ground contact rather than
     detector jitter.
+
+    0.6 m rather than the 1.5 m this once used. The old figure was chosen while
+    the prominence test was measuring an unbounded absolute excursion, under
+    which it barely constrained anything; against a correctly measured
+    prominence it rejects real contacts. A mid-court bounce can be shallow in
+    this signal because projected court y carries both height and down-court
+    travel, and near a contact the two partly cancel - a genuine bounce
+    between two flights can show as little as 0.7 m. Detector jitter, by
+    contrast, is under 0.1 m, so the two are still separated by most of an
+    order of magnitude.
 
     ``hit_reach`` is how close the ball must be to a player, in multiples of
     that player's bounding-box height. A player's box is roughly their real
@@ -166,10 +233,16 @@ def detect_events(
         # peaks when the ball comes back down to the plane. Maxima are ground
         # contact; minima are the apex of a flight and are not events at all.
         height_signal = np.array([s.court[1] for s in run])
-        contacts = _dedupe(
-            _turning_points(height_signal, min_ground_prominence, kind="max"),
-            min_separation,
-        )
+        if bounce_model is not None:
+            contacts, ground_contacts = _learned_contacts(
+                run, bounce_model, min_separation
+            )
+        else:
+            contacts = _dedupe(
+                _turning_points(height_signal, min_ground_prominence, kind="max"),
+                min_separation,
+            )
+            ground_contacts = None
 
         for index in contacts:
             sample = run[index]
@@ -177,6 +250,13 @@ def detect_events(
                 sample.image, sample.frame, player_boxes
             )
             near_a_player = distance is not None and distance <= hit_reach
+
+            if not near_a_player and ground_contacts is not None:
+                # The model answers "did the ball touch the court here?". A
+                # candidate it rejects, with no player within reach, is neither
+                # a bounce nor a hit - drop it.
+                if index not in ground_contacts:
+                    continue
 
             if near_a_player:
                 kind = EventType.HIT

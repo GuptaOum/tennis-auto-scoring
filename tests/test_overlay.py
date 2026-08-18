@@ -292,24 +292,51 @@ def test_panels_are_drawn_inside_the_frame_for_a_small_video():
     assert renderer.render(frame, 30).shape == (360, 640, 3)
 
 
-def test_the_fourteen_court_landmarks_are_drawn_in_red():
-    # The keypoint model's whole job. Drawn from the fitted homography, so a
-    # dot off its line means the calibration drifted - visible, not hidden.
+def test_the_four_court_corners_are_drawn_in_red():
+    # Corners only, and no court lines: the real court already has lines
+    # painted on it, so drawing ours over the footage hid detail without
+    # adding information. A dot away from the painted corner underneath it
+    # still shows a drifted calibration.
+    from tennis.overlay import COURT_CORNERS
+
     renderer = a_renderer()
-    frame = blank()
-    out = renderer.render(frame, 30)
-    calibration = a_calibration()
-    landmarks = calibration.to_image(COURT_MODEL)
+    out = renderer.render(blank(), 30)
+    corners = a_calibration().to_image(COURT_MODEL[COURT_CORNERS])
+
     hits = 0
-    for point in landmarks:
+    for point in corners:
         x, y = int(point[0]), int(point[1])
         if not (0 <= x < WIDTH and 0 <= y < HEIGHT):
             continue
         patch = out[max(y - 3, 0):y + 4, max(x - 3, 0):x + 4]
-        # Red in BGR: the red channel dominates at the landmark.
+        # Red in BGR: the red channel dominates at the corner dot.
         if patch[..., 2].max() > 180 and patch[..., 1].max() < 200:
             hits += 1
-    assert hits >= 12, f"only {hits} of 14 landmarks drawn"
+    # Not all four every time: the scoreboard, minimap and player panels are
+    # drawn after the court and legitimately cover a corner near an edge. The
+    # point of the test is that corners are marked, not that the HUD is
+    # transparent.
+    assert hits >= 3, f"only {hits} of {len(corners)} corners drawn"
+
+
+def test_the_non_corner_landmarks_are_not_drawn():
+    """Service marks and centre marks must be gone, not merely fewer."""
+    from tennis.overlay import COURT_CORNERS
+
+    renderer = a_renderer()
+    out = renderer.render(blank(), 30)
+    calibration = a_calibration()
+    others = [i for i in range(len(COURT_MODEL)) if i not in COURT_CORNERS]
+
+    for index in others:
+        point = calibration.to_image(COURT_MODEL[[index]])[0]
+        x, y = int(point[0]), int(point[1])
+        if not (3 <= x < WIDTH - 3 and 3 <= y < HEIGHT - 3):
+            continue
+        patch = out[y - 2:y + 3, x - 2:x + 3]
+        assert not (patch[..., 2].max() > 180 and patch[..., 1].max() < 200), (
+            f"landmark {index} is still being drawn"
+        )
 
 
 def test_landmarks_are_absent_without_a_calibration():

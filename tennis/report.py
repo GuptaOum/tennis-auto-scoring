@@ -531,6 +531,7 @@ def _players(report: dict) -> str:
             f'<span class="side">{escape(str(player.get("side", "")))} side</span></h3>'
             f'<div class="split">{heat}<div class="split-body">'
             f'<dl class="stats">'
+            f"<dt>shots hit</dt><dd>{player.get('shots_hit', 0)}</dd>"
             f"<dt>distance covered</dt><dd>{_fmt(player.get('distance_covered_m'), ' m')}</dd>"
             f"<dt>average speed</dt><dd>{_fmt(player.get('average_speed_kmh'), ' km/h')}</dd>"
             f"<dt>top speed</dt><dd>{_fmt(player.get('top_speed_kmh'), ' km/h')}</dd>"

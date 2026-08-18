@@ -5,8 +5,6 @@ models/*.pth
 # Videos: inputs are yours, outputs are reproducible
 input_videos/*
 !input_videos/.gitkeep
-output_videos/*
-!output_videos/.gitkeep
 
 # Ultralytics run artifacts
 runs/
@@ -15,9 +13,6 @@ runs/
 training/tennis-ball-detection-*/
 training/data/
 *.zip
-
-# Cached detections
-tracker_stubs/*.pkl
 
 # Python
 __pycache__/
@@ -38,3 +33,9 @@ Thumbs.db
 .env
 output/
 yolov8x.pt
+
+# TrackNet dataset (several GB, downloaded not committed)
+training/tracknet_data/
+training/ball_sweep/
+training/ball_ft_run/
+training/bounce_features.npz

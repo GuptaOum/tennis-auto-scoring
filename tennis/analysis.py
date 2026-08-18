@@ -140,6 +140,26 @@ def analyse_players(
     return stats
 
 
+def shots_per_player(events) -> dict:
+    """How many shots each tracked player hit.
+
+    Reads the ``by_player`` attribution the hit detector already made - the
+    ball was closest to that player, in units of their own box height, at the
+    frame where its direction changed. Hits that happened while no player was
+    tracked are counted under ``None`` rather than being dropped, because a
+    shot total that silently omits them reads as a shorter match than was
+    played.
+    """
+    from tennis.bounce import EventType
+
+    counts: dict = {}
+    for event in events:
+        if event.type is EventType.HIT:
+            key = getattr(event, "by_player", None)
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 def court_coverage(
     player_track: list[dict], track_id: int, bins: int = 6
 ) -> list[list[int]]:

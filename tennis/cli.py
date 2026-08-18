@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 
 from tennis import analysis as analysis_module
+from tennis import balltrack
 from tennis import placement as placement_module
 from tennis import players as players_module
 from tennis import overlay
@@ -31,6 +32,7 @@ from tennis import serve as serve_module
 from tennis import video
 from tennis.bounce import EventType, detect_events
 from tennis.court import calibrate
+from tennis.court_refine import refine as refine_court
 from tennis.detect import BallDetector, CourtDetector, PlayerDetector
 from tennis.trajectory import from_detections
 
@@ -58,9 +60,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--ball-imgsz",
         type=int,
-        default=960,
-        help="inference resolution for the ball detector (default 960; 640 "
-             "halves the detection rate on 1080p footage)",
+        default=1600,
+        help="inference resolution for the ball detector (default 1600; the "
+             "optimum tracks apparent ball size, so a wide broadcast shot "
+             "needs more than the 960 that suits a tight amateur clip)",
+    )
+    parser.add_argument(
+        "--ball-conf",
+        type=float,
+        default=0.02,
+        help="confidence floor for ball candidates (default 0.02; deliberately "
+             "permissive - which candidate is the ball is decided by "
+             "tennis.balltrack from the whole flight, not by this threshold)",
+    )
+    parser.add_argument(
+        "--bounce-model",
+        default="models/bounce_model.joblib",
+        help="trained bounce classifier (default models/bounce_model.joblib). "
+             "Pass 'none' to fall back to the geometric prominence rule, which "
+             "is kept only as a fallback: a sweep of its threshold against "
+             "scoreboard ground truth found no value that detects every point",
+    )
+    parser.add_argument(
+        "--no-court-refine",
+        action="store_true",
+        help="skip snapping the fitted court onto the painted court lines. "
+             "The keypoint model mislocates the court in a way reprojection "
+             "error cannot detect, so this is on by default",
     )
     parser.add_argument("--player-model", default="yolov8x.pt")
     parser.add_argument("--ball-model", default="models/ball_finetuned.pt")
@@ -74,6 +100,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="skip the HTML report (report.html is written by default)",
     )
     return parser.parse_args(argv)
+
+
+def _load_bounce_model(path: str | None):
+    """The trained bounce classifier, or None to use the geometric fallback.
+
+    A missing model file is reported and skipped rather than raised. The
+    geometric rule still runs, so the pipeline degrades to its previous
+    behaviour instead of refusing to analyse the video at all - but it says so,
+    because the two paths do not give the same answer and a silent downgrade
+    would be read as a result.
+    """
+    if not path or path.lower() == "none":
+        return None
+
+    from tennis.bounce_learned import LearnedBounceDetector
+
+    try:
+        return LearnedBounceDetector.load(path)
+    except FileNotFoundError:
+        print(
+            f"  no bounce model at {path} - falling back to the geometric rule; "
+            f"train one with training/train_bounce.py",
+            flush=True,
+        )
+        return None
 
 
 def run(args: argparse.Namespace) -> dict:
@@ -95,7 +146,7 @@ def run(args: argparse.Namespace) -> dict:
     print("loading models...", flush=True)
     players_model = PlayerDetector(args.player_model, device=device)
     ball_model = BallDetector(args.ball_model, device=device,
-                              imgsz=args.ball_imgsz)
+                              imgsz=args.ball_imgsz, conf=args.ball_conf)
     court_model = CourtDetector(args.court_model, device=device)
 
     # No writer during detection. The annotated video is rendered in a second
@@ -107,6 +158,8 @@ def run(args: argparse.Namespace) -> dict:
     calib = None
     keypoints = None
     calibrations: list[dict] = []
+    ball_candidates: list[dict] = []
+    frame_calibration: dict[int, object] = {}
     ball_track: list[dict] = []
     player_track: list[dict] = []
     player_boxes: dict[int, dict[int, tuple]] = {}
@@ -122,21 +175,33 @@ def run(args: argparse.Namespace) -> dict:
             keypoints = court_model.detect(frame)
             try:
                 candidate = calibrate(keypoints, frame_index=index)
+                # The keypoint fit is only a starting guess. It mislocates the
+                # court consistently, which reprojection error cannot see, so
+                # snap it onto the lines actually painted on the ground. Held
+                # out over two clips this took the worst corner from 14 px to
+                # 4 px and from 68 px to 8 px. See tennis/court_refine.py.
+                refinement = None
+                if not args.no_court_refine:
+                    candidate, refinement = refine_court(frame, candidate)
                 # Keep the previous calibration if this frame's is worse -
                 # a player crossing a line can briefly wreck the keypoints,
                 # and a fixed camera means the old matrix is still valid.
                 if calib is None or candidate.is_reliable:
                     calib = candidate
-                calibrations.append(
-                    {
-                        "frame": index,
-                        "reprojection_error_px": round(
-                            candidate.reprojection_error, 2
-                        ),
-                        "inliers": candidate.inlier_count,
-                        "reliable": candidate.is_reliable,
-                    }
-                )
+                record = {
+                    "frame": index,
+                    "reprojection_error_px": round(
+                        candidate.reprojection_error, 2
+                    ),
+                    "inliers": candidate.inlier_count,
+                    "reliable": candidate.is_reliable,
+                }
+                if refinement is not None:
+                    # Reported separately and never folded into the
+                    # reprojection figure: they measure different things, and
+                    # conflating them is what hid this error in the first place.
+                    record["line_alignment"] = refinement
+                calibrations.append(record)
             except ValueError as exc:
                 calibrations.append({"frame": index, "error": str(exc)})
 
@@ -146,18 +211,25 @@ def run(args: argparse.Namespace) -> dict:
         detected_players = players_module.select(
             players_model.detect(frame), calib
         )
-        ball = ball_model.detect(frame)
-
-        if ball is not None and calib is not None:
-            court_pt = calib.to_court(ball.centre)
-            ball_track.append(
+        # Every plausible ball, not one guess. Which is the real one is settled
+        # after the pass, when the flight either supports a candidate or does
+        # not. See tennis/balltrack.py.
+        found = ball_model.candidates(frame)
+        if found:
+            ball_candidates.append(
                 {
                     "frame": index,
-                    "image": [float(v) for v in ball.centre],
-                    "court": [float(court_pt[0]), float(court_pt[1])],
-                    "confidence": round(ball.confidence, 3),
+                    "boxes": [
+                        {
+                            "conf": round(d.confidence, 4),
+                            "xy": [float(v) for v in d.centre],
+                        }
+                        for d in found
+                    ],
                 }
             )
+        if calib is not None:
+            frame_calibration[index] = calib
 
         if calib is not None:
             for player in detected_players:
@@ -191,10 +263,35 @@ def run(args: argparse.Namespace) -> dict:
     elapsed = time.time() - started
     reliable = [c for c in calibrations if c.get("reliable")]
 
+    # Resolve which candidate was the ball, using the whole flight. Measured on
+    # the Wimbledon clip against picking the highest-confidence box per frame:
+    # detection 69.3% -> 89.4% with the implausible-step rate unchanged
+    # (0.4% -> 0.6%), and the gaps that fragment rallies cut from 10 to 2.
+    resolved = balltrack.resolve(ball_candidates, conf_floor=args.ball_conf)
+    for row in resolved:
+        calibration = frame_calibration.get(row["frame"])
+        if calibration is None:
+            continue
+        court_pt = calibration.to_court(np.asarray(row["image"], dtype=float))
+        ball_track.append(
+            {
+                "frame": row["frame"],
+                "image": row["image"],
+                "court": [float(court_pt[0]), float(court_pt[1])],
+                "confidence": row["confidence"],
+            }
+        )
+    rejected = sum(len(r["boxes"]) for r in ball_candidates) - len(resolved)
+
     # Everything above is per-frame detection. Everything below turns that into
     # a score: trajectory -> bounces and hits -> rallies -> points.
     trajectory = from_detections(ball_track)
-    events = detect_events(trajectory, player_boxes=player_boxes, fps=info.fps)
+    events = detect_events(
+        trajectory,
+        player_boxes=player_boxes,
+        fps=info.fps,
+        bounce_model=_load_bounce_model(args.bounce_model),
+    )
     # Serves must be judged before scoring: a first-serve fault ends no point,
     # and without that the point is awarded to the wrong player.
     provisional = rally_module.segment(events, fps=info.fps)
@@ -245,6 +342,10 @@ def run(args: argparse.Namespace) -> dict:
             "ball_detection_rate": (
                 round(len(ball_track) / processed, 3) if processed else 0.0
             ),
+            "ball_candidates_seen": sum(len(r["boxes"]) for r in ball_candidates),
+            "ball_candidates_rejected": rejected,
+            "ball_imgsz": args.ball_imgsz,
+            "ball_conf_floor": args.ball_conf,
             "player_observations": len(player_track),
         },
         "events": {
@@ -258,6 +359,12 @@ def run(args: argparse.Namespace) -> dict:
         "score": match.summary(),
     }
 
+    # Hits are already attributed to whoever the ball was closest to when it
+    # changed direction, in box-height units. Counting them per player turns
+    # that into a shot count, which is the one match statistic a viewer checks
+    # first and the baseline never produced.
+    shots_by_player = analysis_module.shots_per_player(events)
+
     for player in analysis["players"]:
         grid = analysis_module.court_coverage(player_track, player["track_id"])
         player["coverage"] = analysis_module.render_coverage(grid)
@@ -265,6 +372,10 @@ def run(args: argparse.Namespace) -> dict:
         # court plan, and shading characters cannot be un-rendered back into
         # counts. Costs 36 integers per player.
         player["coverage_grid"] = grid
+        player["shots_hit"] = shots_by_player.get(player["track_id"], 0)
+
+    analysis["shots_by_player"] = shots_by_player
+    analysis["shots_unattributed"] = shots_by_player.get(None, 0)
 
     report["points"] = [
         {
@@ -281,6 +392,22 @@ def run(args: argparse.Namespace) -> dict:
     (out_dir / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     (out_dir / "ball_track.json").write_text(
         json.dumps(ball_track, indent=2), encoding="utf-8"
+    )
+    # Image-space player boxes, kept so the event layer can be re-tuned from a
+    # finished run instead of re-running detection for every parameter tried.
+    # Hit classification needs pixel proximity, so court positions alone are
+    # not enough to reproduce it offline.
+    (out_dir / "tracks.json").write_text(
+        json.dumps(
+            {
+                str(track_id): {
+                    str(frame): [round(float(v), 1) for v in box]
+                    for frame, box in by_frame.items()
+                }
+                for track_id, by_frame in player_boxes.items()
+            }
+        ),
+        encoding="utf-8",
     )
     if not args.no_html:
         report_module.write(report, out_dir / "report.html")
@@ -340,6 +467,7 @@ def main(argv: list[str] | None = None) -> int:
     for player in report["analysis"]["players"]:
         print(
             f"player {player['track_id']} ({player['side']} side): "
+            f"{player.get('shots_hit', 0)} shots, "
             f"{player['distance_covered_m']} m covered, "
             f"avg {player['average_speed_kmh']} km/h, "
             f"top {player['top_speed_kmh']} km/h, "

@@ -27,6 +27,8 @@ Court frame: x 0 to 10.97 across, y 0 to 23.77 from the far baseline, net at
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from tennis.court import COURT_LENGTH, DOUBLES_WIDTH, NET_Y, CourtCalibration
@@ -57,18 +59,46 @@ def is_plausible(court_point: np.ndarray) -> bool:
     )
 
 
+# Stable identities, matching rally.py's convention: player 1 defends the near
+# half, player 2 the far half.
+NEAR_PLAYER = 1
+FAR_PLAYER = 2
+
+
 def select(
     detections: list[Detection], calibration: CourtCalibration | None
 ) -> list[Detection]:
     """The at-most-two people actually playing, one per side of the net.
 
+    The returned detections are re-identified by **side**, not by the tracker's
+    id. That matters more than it sounds. The person detector's tracker
+    reassigns ids freely across a clip - one Wimbledon rally produced ids 5,
+    11, 14, 16, 22 and 26 for two people - and every one of those becomes a
+    separate identity downstream: a separate distance total, a separate shot
+    count, a separate coverage grid, and a separate row in the annotated
+    video's player panel, most of them reading zero. The output then claims
+    sixteen players in a singles match.
+
+    Side is the identity that actually holds. Singles has exactly one player
+    per half and they do not swap during a point, so "the near player" names
+    the same human for the whole rally no matter how many times the tracker
+    loses and re-acquires them. It is the same fact this module already uses to
+    choose between candidates, applied one step further.
+
     Without a calibration there is no court to measure against, so the two
     largest boxes are returned - players are nearer the camera than the crowd,
-    and it is the best available guess. Every caller treats this as a guess:
-    nothing downstream claims a metre until a calibration exists.
+    and it is the best available guess. Sides are then assigned by image
+    position, the lower box being the nearer player. Every caller treats this
+    as a guess: nothing downstream claims a metre until a calibration exists.
     """
     if calibration is None:
-        return sorted(detections, key=_box_area, reverse=True)[:2]
+        largest = sorted(detections, key=_box_area, reverse=True)[:2]
+        # Lower in the image means closer to the camera, hence the near side.
+        by_depth = sorted(largest, key=lambda d: d.feet[1], reverse=True)
+        return [
+            replace(detection, track_id=identity)
+            for detection, identity in zip(by_depth, (NEAR_PLAYER, FAR_PLAYER))
+        ]
 
     scored: list[tuple[Detection, np.ndarray, float]] = []
     for detection in detections:
@@ -81,7 +111,7 @@ def select(
         scored.append((detection, court, court_distance(court)))
 
     chosen: list[Detection] = []
-    for near_side in (False, True):
+    for near_side, identity in ((False, FAR_PLAYER), (True, NEAR_PLAYER)):
         side = [
             item for item in scored
             if (float(item[1][1]) >= NET_Y) == near_side
@@ -91,7 +121,7 @@ def select(
         # Closest to the court wins; a larger box breaks a tie, which favours
         # the player over someone standing further from the camera behind them.
         best = min(side, key=lambda item: (round(item[2], 2), -_box_area(item[0])))
-        chosen.append(best[0])
+        chosen.append(replace(best[0], track_id=identity))
     return chosen
 
 

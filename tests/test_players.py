@@ -139,4 +139,36 @@ def test_without_a_calibration_it_falls_back_to_the_two_largest():
     large = Detection(bbox=(0, 0, 100, 220), confidence=0.9, track_id=2)
     medium = Detection(bbox=(0, 0, 50, 110), confidence=0.9, track_id=3)
     chosen = players.select([small, large, medium], None)
-    assert [d.track_id for d in chosen] == [2, 3]
+
+    # The two largest are the ones kept - the smallest is dropped.
+    assert [d.bbox for d in chosen] == [large.bbox, medium.bbox]
+    # ...and they come back identified by side rather than by the tracker's id,
+    # the lower box in the image being the nearer player.
+    assert [d.track_id for d in chosen] == [
+        players.NEAR_PLAYER,
+        players.FAR_PLAYER,
+    ]
+
+
+def test_identities_are_sides_not_tracker_ids():
+    """The tracker's ids churn; the side a player stands on does not.
+
+    One Wimbledon rally produced six different ids for two people. Carrying
+    those through would report six players, splitting one person's distance,
+    shots and coverage across several near-empty identities.
+    """
+    calibration = a_calibration()
+    far = at_court(calibration, 5.0, 4.0, track_id=17)
+    near = at_court(calibration, 5.0, 20.0, track_id=42)
+
+    chosen = players.select([far, near], calibration)
+    by_id = {d.track_id for d in chosen}
+    assert by_id == {players.NEAR_PLAYER, players.FAR_PLAYER}
+
+    # Same two people, ids reassigned by the tracker a moment later.
+    again = players.select(
+        [at_court(calibration, 5.2, 4.1, track_id=91),
+         at_court(calibration, 5.1, 19.8, track_id=93)],
+        calibration,
+    )
+    assert {d.track_id for d in again} == by_id
