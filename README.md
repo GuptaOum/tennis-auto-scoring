@@ -11,7 +11,7 @@ python -m tennis.track --input input_videos/clip.mp4 --out output/tracked
 Output: an annotated video and `tracks.json` with per-frame ball position,
 player boxes and court corners.
 
-![proof of concept](output/poc/preview.png)
+![proof of concept](docs/preview.png)
 
 ## The three trackers
 
@@ -126,8 +126,27 @@ tests/        202 tests
 pip install -r requirements.txt
 ```
 
-Weights go in `models/`. A GPU is strongly recommended — YOLOv8x runs ~14 s/frame
-on CPU at 1080p, versus 5.3 fps on a T4.
+Weights are not in the repo (they are 40–140 MB each). Fetch them into `models/`:
+
+```bash
+pip install huggingface_hub
+python -c "
+from huggingface_hub import hf_hub_download as d; import shutil
+for repo, f in [('kjfk/tracknet-tennis-ball-mirror','tracknet_tennis.pt'),
+                ('kjfk/tennis-court-keypoints-mirror','keypoints_model.pth'),
+                ('kjfk/yolov8x-coco-mirror','yolov8x.pt')]:
+    shutil.copy(d(repo_id=repo, filename=f), 'models/'+f); print(f)
+"
+```
+
+Then run it:
+
+```bash
+python -m tennis.track --input input_videos/your_clip.mp4 --out output/tracked
+```
+
+A GPU is strongly recommended — YOLOv8x runs ~14 s/frame on CPU at 1080p, versus
+5.3 fps on a T4. The run prints a warning if it finds itself on CPU.
 
 ## Credits
 

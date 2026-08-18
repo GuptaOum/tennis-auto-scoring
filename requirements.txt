@@ -1,7 +1,14 @@
-ultralytics>=8.2
-torch>=2.2
+# Core pipeline
+ultralytics>=8.2         # YOLO player detector
+torch>=2.2               # TrackNet ball detector
 torchvision>=0.17
 opencv-python>=4.9
 numpy>=1.26
-pandas>=2.2
+scipy>=1.11              # court_refine: line-snapping optimiser
+
+# Bounce classifier (only needed for the scoring path)
+scikit-learn>=1.4
+joblib>=1.3
+
+# Tests
 pytest>=8.0

@@ -32,6 +32,7 @@ Thumbs.db
 # Secrets
 .env
 output/
+!docs/
 yolov8x.pt
 
 # TrackNet dataset (several GB, downloaded not committed)
